@@ -110,4 +110,10 @@ export class DownloadService {
            return { valid: false, message: 'Invalid path format' };
        }
    }
+
+   checkDuplicateFile(fileName: string): boolean {
+        const downloadPath = this.getDownloadPath();
+        const fullPath = path.join(downloadPath, fileName);
+        return fs.existsSync(fullPath);
+    }
 }

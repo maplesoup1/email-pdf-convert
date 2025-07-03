@@ -8,6 +8,7 @@ import { AttachmentsService } from '../attachments/attachments.service';
 import { PdfService } from '../pdf/pdf.service';
 import { HtmlService } from '../html/html.service';
 import { PuppeteerService } from '../puppeteer/puppeteer.service';
+import { DownloadService } from '../download/download.service';
 
 interface EmailProcessResult {
    messageId: string;
@@ -21,6 +22,7 @@ interface EmailProcessResult {
    attachments: any[];
    pdfPath: string;
    merged: boolean;
+   skipped?: boolean;
 }
 
 interface AttachmentPageInfo {
@@ -47,42 +49,53 @@ export class EmailsService {
        private readonly pdfService: PdfService,
        private readonly htmlService: HtmlService,
        private readonly puppeteerService: PuppeteerService,
+       private readonly downloadService: DownloadService,
    ) {}
 
    async processEmail(messageId: string, outputDir?: string): Promise<EmailProcessResult> {
-       const email = await this.gmailService.getEmailById(messageId, this.sessionId!);
-       const attachments = this.attachmentsService.detectAttachments(email.payload);
-       const hasPdfAttachment = this.attachmentsService.hasPdfAttachment(attachments);
-
-       const fileName = this.pdfService.generateSafeFileName(
-           email.subject, 
-           email.messageId, 
-           hasPdfAttachment
-       );
-       
-       const downloadDir = outputDir || path.join(__dirname, 'downloads');
-       const outputPath = path.join(downloadDir, fileName);
-
-       if (!fs.existsSync(downloadDir)) {
-           fs.mkdirSync(downloadDir, { recursive: true });
-       }
-
-       const emailHeaders: EmailHeaders = {
-           subject: email.subject,
-           from: email.from,
-           date: email.date
-       };
-
-       const result = await this.generatePdf(email, attachments, hasPdfAttachment, outputPath, downloadDir, emailHeaders);
-
-       return {
-           ...email,
-           attachments,
-           pdfPath: outputPath,
-           ...result,
-           merged: hasPdfAttachment,
-       };
-   }
+    const email = await this.gmailService.getEmailById(messageId, this.sessionId!);
+    const attachments = this.attachmentsService.detectAttachments(email.payload);
+    const hasPdfAttachment = this.attachmentsService.hasPdfAttachment(attachments);
+ 
+    const fileName = this.pdfService.generateSafeFileName(
+        email.subject, 
+        email.messageId, 
+        hasPdfAttachment
+    );
+    
+    const downloadDir = outputDir || path.join(__dirname, 'downloads');
+    const outputPath = path.join(downloadDir, fileName);
+ 
+    if (this.downloadService.checkDuplicateFile(fileName)) {
+        return {
+            ...email,
+            attachments,
+            pdfPath: outputPath,
+            merged: hasPdfAttachment,
+            skipped: true
+        };
+    }
+ 
+    if (!fs.existsSync(downloadDir)) {
+        fs.mkdirSync(downloadDir, { recursive: true });
+    }
+ 
+    const emailHeaders: EmailHeaders = {
+        subject: email.subject,
+        from: email.from,
+        date: email.date
+    };
+ 
+    const result = await this.generatePdf(email, attachments, hasPdfAttachment, outputPath, downloadDir, emailHeaders);
+ 
+    return {
+        ...email,
+        attachments,
+        pdfPath: outputPath,
+        ...result,
+        merged: hasPdfAttachment,
+    };
+ }
 
    private async generatePdf(email: any, attachments: any[], hasPdfAttachment: boolean, outputPath: string, downloadDir: string, emailHeaders: EmailHeaders) {
        if (hasPdfAttachment) {
