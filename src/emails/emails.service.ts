@@ -1,11 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import pLimit from 'p-limit';
 import * as fs from 'fs';
 import * as path from 'path';
 import { PDFDocument } from 'pdf-lib';
 import { GmailService } from '../gmail/gmail.service';
 import { AttachmentsService } from '../attachments/attachments.service';
-import { PdfService } from '../pdf/pdf.service';
+import { PdfService, PdfProcessingOption } from '../pdf/pdf.service';
 import { HtmlService } from '../html/html.service';
 import { PuppeteerService } from '../puppeteer/puppeteer.service';
 import { DownloadService } from '../download/download.service';
@@ -20,9 +19,11 @@ interface EmailProcessResult {
    isHtml: boolean;
    payload: any;
    attachments: any[];
-   pdfPath: string;
+   pdfPaths: string[];
+   processingOption: PdfProcessingOption;
    merged: boolean;
    skipped?: boolean;
+   attachmentPageInfo?: AttachmentPageInfo[];
 }
 
 interface AttachmentPageInfo {
@@ -39,6 +40,16 @@ interface EmailHeaders {
    date: string;
 }
 
+interface AutoProcessResult {
+    success: boolean;
+    totalEmails: number;
+    processedEmails: number;
+    failedEmails: number;
+    emailResults: EmailProcessResult[];
+    errors: string[];
+    processingTime: number;
+}
+
 @Injectable()
 export class EmailsService {
    private sessionId: string | null = null;
@@ -52,70 +63,27 @@ export class EmailsService {
        private readonly downloadService: DownloadService,
    ) {}
 
-   async processEmail(messageId: string, outputDir?: string): Promise<EmailProcessResult> {
-    const email = await this.gmailService.getEmailById(messageId, this.sessionId!);
-    const attachments = this.attachmentsService.detectAttachments(email.payload);
-    const hasPdfAttachment = this.attachmentsService.hasPdfAttachment(attachments);
- 
-    const fileName = this.pdfService.generateSafeFileName(
-        email.subject, 
-        email.messageId, 
-        hasPdfAttachment
-    );
-    
-    const downloadDir = outputDir || path.join(__dirname, 'downloads');
-    const outputPath = path.join(downloadDir, fileName);
- 
-    if (this.downloadService.checkDuplicateFile(fileName)) {
-        return {
-            ...email,
-            attachments,
-            pdfPath: outputPath,
-            merged: hasPdfAttachment,
-            skipped: true
-        };
-    }
- 
-    if (!fs.existsSync(downloadDir)) {
-        fs.mkdirSync(downloadDir, { recursive: true });
-    }
- 
-    const emailHeaders: EmailHeaders = {
-        subject: email.subject,
-        from: email.from,
-        date: email.date
-    };
- 
-    const result = await this.generatePdf(email, attachments, hasPdfAttachment, outputPath, downloadDir, emailHeaders);
- 
-    return {
-        ...email,
-        attachments,
-        pdfPath: outputPath,
-        ...result,
-        merged: hasPdfAttachment,
-    };
- }
-
-   private async generatePdf(email: any, attachments: any[], hasPdfAttachment: boolean, outputPath: string, downloadDir: string, emailHeaders: EmailHeaders) {
-       if (hasPdfAttachment) {
-           return await this.generateMergedPdf(email, attachments, outputPath, downloadDir, emailHeaders);
-       } else {
-           return await this.generateEmailOnlyPdf(email, attachments, outputPath, emailHeaders);
-       }
+   setSessionId(sessionId: string): void {
+       this.sessionId = sessionId;
+       this.gmailService.setSessionId(sessionId);
    }
 
-   private async generateMergedPdf(email: any, attachments: any[], outputPath: string, downloadDir: string, emailHeaders: EmailHeaders) {
-       const htmlContent = this.htmlService.createEmailHTML(email, attachments);
-       const emailPdfBuffer = await this.puppeteerService.convertHtmlToPdf(htmlContent, null!, true);
-       
+   private ensureDownloadDir(outputDir?: string): string {
+       const downloadDir = outputDir || path.join(__dirname, 'downloads');
+       if (!fs.existsSync(downloadDir)) {
+           fs.mkdirSync(downloadDir, { recursive: true });
+       }
+       return downloadDir;
+   }
+
+   private async downloadAttachments(attachments: any[], messageId: string, downloadDir: string): Promise<{ paths: string[], names: string[] }> {
        const pdfAttachmentPaths: string[] = [];
        const attachmentNames: string[] = [];
        
        for (const attachment of attachments) {
            if (attachment.isPdf) {
                const attachmentPath = await this.gmailService.downloadAttachment(
-                   email.messageId,
+                   messageId,
                    attachment.attachmentId,
                    attachment.filename,
                    downloadDir,
@@ -126,74 +94,127 @@ export class EmailsService {
            }
        }
 
-       const attachmentPageInfo = await this.analyzeAttachmentPages(attachments, pdfAttachmentPaths);
-       const mergedPdfBuffer = await this.pdfService.mergePDFs(
-           emailPdfBuffer, 
-           pdfAttachmentPaths, 
-           emailHeaders, 
-           attachmentNames
-       );
-       
-       fs.writeFileSync(outputPath, mergedPdfBuffer);
-       this.pdfService.cleanupTempFiles(pdfAttachmentPaths);
+       return { paths: pdfAttachmentPaths, names: attachmentNames };
+   }
 
-       return { 
-           merged: true,
-           attachmentPageInfo 
+   private writeOutputFiles(result: any, processingOption: PdfProcessingOption, downloadDir: string): string[] {
+       const outputPaths: string[] = [];
+       
+       if (result.mergedPdf) {
+           const mergedPath = path.join(downloadDir, result.filenames[0]);
+           fs.writeFileSync(mergedPath, result.mergedPdf);
+           outputPaths.push(mergedPath);
+       }
+
+       if (result.emailPdf) {
+           const emailPath = path.join(downloadDir, result.filenames[0]);
+           fs.writeFileSync(emailPath, result.emailPdf);
+           outputPaths.push(emailPath);
+       }
+
+       if (result.attachmentPdfs) {
+           result.attachmentPdfs.forEach((attachmentBuffer: Buffer, index: number) => {
+               const attachmentIndex = processingOption === PdfProcessingOption.SEPARATE_EMAIL_AND_ATTACHMENTS ? index + 1 : index;
+               const attachmentPath = path.join(downloadDir, result.filenames[attachmentIndex]);
+               fs.writeFileSync(attachmentPath, attachmentBuffer);
+               outputPaths.push(attachmentPath);
+           });
+       }
+
+       return outputPaths;
+   }
+
+   async processEmail(
+       messageId: string, 
+       processingOption: PdfProcessingOption = PdfProcessingOption.MERGE_WITH_ATTACHMENTS,
+       outputDir?: string
+   ): Promise<EmailProcessResult> {
+       const email = await this.gmailService.getEmailById(messageId, this.sessionId!);
+       const attachments = this.attachmentsService.detectAttachments(email.payload);
+       const downloadDir = this.ensureDownloadDir(outputDir);
+
+       const emailHeaders: EmailHeaders = {
+           subject: email.subject,
+           from: email.from,
+           date: email.date
        };
-   }
 
-   private async generateEmailOnlyPdf(email: any, attachments: any[], outputPath: string, emailHeaders: EmailHeaders) {
-       const htmlContent = this.htmlService.createEmailHTML(email, attachments);
-       const emailPdfBuffer = await this.puppeteerService.convertHtmlToPdf(htmlContent, null!, true);
-       const processedPdfBuffer = await this.pdfService.createEmailOnlyPDF(emailPdfBuffer, emailHeaders);
-       
-       fs.writeFileSync(outputPath, processedPdfBuffer);
-       
-       return { merged: false };
-   }
-
-   async processMultipleEmails(
-    messageIds: string[],
-    outputDir?: string
-  ): Promise<EmailProcessResult[]> {
-    const tasks = messageIds.map(async (id) => {
-      try {
-        const result = await this.processEmail(id, outputDir);
-        return result;
-      } catch (error) {
-        console.error(`Failed to process email ${id}:`, error);
-        return null;
-      }
-    });
-  
-    const results = await Promise.all(tasks);
-    return results.filter((result): result is EmailProcessResult => result !== null);
-  }
-  
-  
-   async demergePdf(mergedPdfPath: string, emailPageCount: number, attachmentPageInfo: AttachmentPageInfo[], outputDir?: string, emailHeaders?: EmailHeaders): Promise<any> {
-       const demergeDir = outputDir || path.dirname(mergedPdfPath);
-       
-       const attachmentInfo = attachmentPageInfo.map(info => ({
-           originalName: info.originalName,
-           pageCount: info.pageCount
-       }));
-
-       const results = await this.pdfService.demergePDF(
-           mergedPdfPath,
-           emailPageCount,
-           attachmentInfo,
-           demergeDir,
+       const result = await this.generatePdfWithOptions(
+           email, 
+           attachments, 
+           processingOption, 
+           downloadDir, 
            emailHeaders
        );
 
-       return results;
+       return {
+           ...email,
+           attachments,
+           ...result,
+           processingOption,
+           merged: processingOption === PdfProcessingOption.MERGE_WITH_ATTACHMENTS
+       };
    }
 
-   setSessionId(sessionId: string): void {
-       this.sessionId = sessionId;
-       this.gmailService.setSessionId(sessionId);
+   private async generatePdfWithOptions(
+       email: any, 
+       attachments: any[], 
+       processingOption: PdfProcessingOption,
+       downloadDir: string, 
+       emailHeaders: EmailHeaders
+   ) {
+       const htmlContent = this.htmlService.createEmailHTML(email, attachments);
+       const emailPdfBuffer = await this.puppeteerService.convertHtmlToPdf(htmlContent, null!, true);
+       
+       const { paths: pdfAttachmentPaths, names: attachmentNames } = await this.downloadAttachments(
+           attachments, 
+           email.messageId, 
+           downloadDir
+       );
+
+       const result = await this.pdfService.processPdfWithOptions(
+           emailPdfBuffer,
+           pdfAttachmentPaths,
+           emailHeaders,
+           attachmentNames,
+           processingOption,
+           email.messageId
+       );
+
+       const outputPaths = this.writeOutputFiles(result, processingOption, downloadDir);
+       const attachmentPageInfo = await this.analyzeAttachmentPages(attachments, pdfAttachmentPaths);
+       
+       this.pdfService.cleanupTempFiles(pdfAttachmentPaths);
+
+       return {
+           pdfPaths: outputPaths,
+           attachmentPageInfo,
+           skipped: this.checkDuplicateFiles(result.filenames, downloadDir)
+       };
+   }
+
+   private checkDuplicateFiles(filenames: string[], downloadDir: string): boolean {
+       return filenames.some(filename => 
+           this.downloadService.checkDuplicateFile(filename, downloadDir)
+       );
+   }
+
+   async processMultipleEmails(
+       messageIds: string[],
+       processingOption: PdfProcessingOption = PdfProcessingOption.MERGE_WITH_ATTACHMENTS,
+       outputDir?: string
+   ): Promise<EmailProcessResult[]> {
+       const processEmail = async (id: string): Promise<EmailProcessResult | null> => {
+           try {
+               return await this.processEmail(id, processingOption, outputDir);
+           } catch (error) {
+               console.error(`Failed to process email ${id}:`, error);
+               return null;
+           }
+       };
+
+       const results = await Promise.all(messageIds.map(processEmail));
+       return results.filter((result): result is EmailProcessResult => result !== null);
    }
    
    private async analyzeAttachmentPages(attachments: any[], pdfAttachmentPaths: string[]): Promise<AttachmentPageInfo[]> {
@@ -241,6 +262,65 @@ export class EmailsService {
        } catch (error) {
            console.error('Failed to get email page count:', error);
            return 1;
+       }
+   }
+
+   async autoProcessAllEmails(
+       sessionId: string,
+       maxEmails: number = 10,
+       processingOption: PdfProcessingOption = PdfProcessingOption.MERGE_WITH_ATTACHMENTS,
+       outputDir?: string
+   ): Promise<AutoProcessResult> {
+       const startTime = Date.now();
+       const errors: string[] = [];
+       let emailResults: EmailProcessResult[] = [];
+
+       try {
+           this.setSessionId(sessionId);
+           
+           const emailListResponse = await this.gmailService.getEmailList(maxEmails, sessionId);
+           const messageIds = emailListResponse.emails.map(email => email.messageId);
+           
+           if (messageIds.length === 0) {
+               return {
+                   success: false,
+                   totalEmails: 0,
+                   processedEmails: 0,
+                   failedEmails: 0,
+                   emailResults: [],
+                   errors: ['email list is empty'],
+                   processingTime: Date.now() - startTime
+               };
+           }
+
+           emailResults = await this.processMultipleEmails(messageIds, processingOption, outputDir);
+           
+           const processedCount = emailResults.filter(result => !result.skipped).length;
+           const failedCount = messageIds.length - emailResults.length;
+
+           return {
+               success: true,
+               totalEmails: messageIds.length,
+               processedEmails: processedCount,
+               failedEmails: failedCount,
+               emailResults,
+               errors,
+               processingTime: Date.now() - startTime
+           };
+
+       } catch (error) {
+           const errorMessage = error instanceof Error ? error.message : 'unknown error';
+           errors.push(`auto process failed: ${errorMessage}`);
+
+           return {
+               success: false,
+               totalEmails: 0,
+               processedEmails: 0,
+               failedEmails: 0,
+               emailResults,
+               errors,
+               processingTime: Date.now() - startTime
+           };
        }
    }
 }

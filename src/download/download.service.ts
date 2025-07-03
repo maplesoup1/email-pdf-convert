@@ -111,8 +111,8 @@ export class DownloadService {
        }
    }
 
-   checkDuplicateFile(fileName: string): boolean {
-        const downloadPath = this.getDownloadPath();
+   checkDuplicateFile(fileName: string, outputDir?: string): boolean {
+        const downloadPath = outputDir || this.getDownloadPath();
         const fullPath = path.join(downloadPath, fileName);
         return fs.existsSync(fullPath);
     }

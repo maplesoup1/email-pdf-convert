@@ -15,7 +15,7 @@ async function bootstrap() {
  // Body parser configuration (NestJS handles this automatically)
  
  // Create required directories
- const downloadsDir = path.join(__dirname, '../downloads');
+ const downloadsDir = path.join(__dirname, '/Users/xtom/222');
  const attachmentsDir = path.join(downloadsDir, 'attachments');
 
  if (!fs.existsSync(downloadsDir)) {
