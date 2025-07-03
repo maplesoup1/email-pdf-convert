@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import pLimit from 'p-limit';
 import * as fs from 'fs';
 import * as path from 'path';
 import { PDFDocument } from 'pdf-lib';
@@ -139,6 +140,29 @@ export class EmailsService {
        return { merged: false };
    }
 
+   async processMultipleEmails(
+    messageIds: string[],
+    outputDir?: string,
+    concurrency = 5
+  ): Promise<EmailProcessResult[]> {
+    const limit = pLimit(concurrency);
+    const results: EmailProcessResult[] = [];
+  
+    const tasks = messageIds.map((id) =>
+      limit(async () => {
+        try {
+          const result = await this.processEmail(id, outputDir);
+          results.push(result);
+          return result;
+        } catch (error) {
+          return null;
+        }
+      })
+    );
+    await Promise.all(tasks);
+    return results.filter(Boolean);
+  }
+  
    async demergePdf(mergedPdfPath: string, emailPageCount: number, attachmentPageInfo: AttachmentPageInfo[], outputDir?: string, emailHeaders?: EmailHeaders): Promise<any> {
        const demergeDir = outputDir || path.dirname(mergedPdfPath);
        
@@ -196,22 +220,6 @@ export class EmailsService {
        }
        
        return attachmentPageInfo;
-   }
-
-   private formatEmailDate(dateString: string): string {
-       try {
-           const date = new Date(dateString);
-           return date.toLocaleString('zh-CN', {
-               year: 'numeric',
-               month: '2-digit',
-               day: '2-digit',
-               hour: '2-digit',
-               minute: '2-digit',
-               second: '2-digit'
-           });
-       } catch (error) {
-           return dateString;
-       }
    }
 
    async getEmailPageCount(messageId: string): Promise<number> {

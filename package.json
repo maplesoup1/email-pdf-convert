@@ -29,6 +29,7 @@
     "class-validator": "^0.14.2",
     "googleapis": "^150.0.1",
     "multer": "^2.0.1",
+    "p-limit": "^6.2.0",
     "pdf-lib": "^1.17.1",
     "puppeteer": "^24.11.2",
     "reflect-metadata": "^0.2.2",
