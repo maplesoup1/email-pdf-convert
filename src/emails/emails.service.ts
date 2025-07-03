@@ -142,26 +142,22 @@ export class EmailsService {
 
    async processMultipleEmails(
     messageIds: string[],
-    outputDir?: string,
-    concurrency = 5
+    outputDir?: string
   ): Promise<EmailProcessResult[]> {
-    const limit = pLimit(concurrency);
-    const results: EmailProcessResult[] = [];
+    const tasks = messageIds.map(async (id) => {
+      try {
+        const result = await this.processEmail(id, outputDir);
+        return result;
+      } catch (error) {
+        console.error(`Failed to process email ${id}:`, error);
+        return null;
+      }
+    });
   
-    const tasks = messageIds.map((id) =>
-      limit(async () => {
-        try {
-          const result = await this.processEmail(id, outputDir);
-          results.push(result);
-          return result;
-        } catch (error) {
-          return null;
-        }
-      })
-    );
-    await Promise.all(tasks);
-    return results.filter(Boolean);
+    const results = await Promise.all(tasks);
+    return results.filter((result): result is EmailProcessResult => result !== null);
   }
+  
   
    async demergePdf(mergedPdfPath: string, emailPageCount: number, attachmentPageInfo: AttachmentPageInfo[], outputDir?: string, emailHeaders?: EmailHeaders): Promise<any> {
        const demergeDir = outputDir || path.dirname(mergedPdfPath);
