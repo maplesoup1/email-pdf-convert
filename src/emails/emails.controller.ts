@@ -213,4 +213,51 @@ export class EmailsController {
            });
        }
    }
+
+   @Post('convert-multiple')
+    async convertMultipleEmails(
+    @Body() body: { sessionId: string; messageIds: string[]; outputDir?: string }
+    ): Promise<ApiResponse<ConvertEmailResponse[]>> {
+    const { sessionId, messageIds, outputDir } = body;
+
+    if (!sessionId || !Array.isArray(messageIds) || messageIds.length === 0) {
+        throw new HttpException(
+        { success: false, error: 'SessionId and messageIds are required' },
+        HttpStatus.BAD_REQUEST
+        );
+    }
+
+    try {
+        const gmail = await this.authService.getGmailClient(sessionId);
+        for (const id of messageIds) {
+        try {
+            await gmail.users.messages.get({ userId: 'me', id });
+        } catch {
+            throw new Error(`Invalid messageId ${id}. Possibly not accessible for this session.`);
+        }
+        }
+        this.emailsService.setSessionId(sessionId);
+        const results = await this.emailsService.processMultipleEmails(messageIds, outputDir);
+        const responseData: ConvertEmailResponse[] = results.map((r) => ({
+        messageId: r.messageId,
+        subject: r.subject,
+        pdfPath: r.pdfPath,
+        merged: r.merged,
+        attachmentCount: r.attachments.length,
+        pdfAttachmentCount: r.attachments.filter((a) => a.isPdf).length,
+        sessionId,
+        }));
+
+        return {
+        success: true,
+        data: responseData,
+        };
+    } catch (error) {
+        throw new HttpException(
+        { success: false, error: error.message },
+        HttpStatus.INTERNAL_SERVER_ERROR
+        );
+    }
+    }
+
 }
