@@ -36,7 +36,7 @@ interface EmailDetailResponse {
 interface ConvertEmailResponse {
    messageId: string;
    subject: string;
-   pdfPaths: string[];
+   pdfUrls: string[];
    processingOption: PdfProcessingOption;
    merged: boolean;
    attachmentCount: number;
@@ -159,7 +159,7 @@ export class EmailsController {
            return this.createResponse(true, {
                messageId: result.messageId,
                subject: result.subject,
-               pdfPaths: result.pdfPaths,
+               pdfUrls: result.pdfUrls,
                processingOption: result.processingOption,
                merged: result.merged,
                attachmentCount: result.attachments.length,
@@ -244,7 +244,7 @@ export class EmailsController {
            const responseData: ConvertEmailResponse[] = results.map((r) => ({
                messageId: r.messageId,
                subject: r.subject,
-               pdfPaths: r.pdfPaths,
+               pdfUrls: r.pdfUrls,
                processingOption: r.processingOption,
                merged: r.merged,
                attachmentCount: r.attachments.length,

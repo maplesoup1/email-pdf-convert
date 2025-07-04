@@ -6,6 +6,13 @@ import {
   CreateDateColumn,
 } from 'typeorm';
 
+export enum PdfRule {
+  MAIN_BODY_WITH_ATTACHMENT = 'mainbodywithattachment',
+  MAIN_BODY_SEPARATE_ATTACHMENT = 'mainbody_separate_attachment',
+  ATTACHMENT_ONLY = 'attachment_only',
+}
+
+
 @Entity('emails')
 export class Email {
   @PrimaryGeneratedColumn('uuid')
@@ -26,6 +33,13 @@ export class Email {
   @Column({ nullable: true })
   pdfUrl: string;
 
+  @Column({
+    type: 'enum',
+    enum: PdfRule,
+    nullable: true,
+  })
+  pdfRule: PdfRule;
+  
   @CreateDateColumn()
   createdAt: Date;
 

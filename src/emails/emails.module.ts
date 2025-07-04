@@ -1,12 +1,12 @@
 import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { Email } from './emails.entity';
-import { EmailsService } from './emails.service';
 import { EmailsController } from './emails.controller';
+import { EmailsService } from './emails.service';
+import { SharedModule } from '../shared/shared.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Email])],
+  imports: [SharedModule],
   controllers: [EmailsController],
   providers: [EmailsService],
+  exports: [EmailsService], 
 })
 export class EmailsModule {}

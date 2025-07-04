@@ -53,6 +53,19 @@ export class GmailService {
        }
    }
 
+   async getAuthenticatedUserEmail(sessionId: string): Promise<string> {
+       try {
+           await this.ensureAuthenticated(sessionId);
+           const profile = await this.gmail.users.getProfile({
+               userId: 'me'
+           });
+           return profile.data.emailAddress!;
+       } catch (error) {
+           console.error('Failed to get authenticated user email:', error);
+           throw error;
+       }
+   }
+
    async getEmailList(maxResults: number = 10, sessionId: string, pageToken?: string): Promise<EmailListResponse> {
        await this.ensureAuthenticated(sessionId);
        
