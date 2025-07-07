@@ -6,7 +6,7 @@ import {
 } from 'typeorm';
 
 export enum PdfRule {
-  MAIN_BODY_WITH_ATTACHMENT = 'mainbodywithattachment',
+  MAIN_BODY_WITH_ATTACHMENT = 'mainbody_with_attachment',
   MAIN_BODY_SEPARATE_ATTACHMENT = 'mainbody_separate_attachment',
   ATTACHMENT_ONLY = 'attachment_only',
 }

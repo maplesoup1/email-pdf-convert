@@ -81,10 +81,21 @@ export class EmailsService {
     pdfRule: PdfRule = PdfRule.MAIN_BODY_WITH_ATTACHMENT,
     outputDir?: string
   ): Promise<EmailProcessResult> {
+    console.log('=== Processing Email Start ===');
+    console.log('Message ID:', messageId);
+    console.log('PDF Rule:', pdfRule);
+    
     const existingEmail = await this.supabaseService.findEmailByGmailId(messageId);
-    if (existingEmail && this.isRuleAlreadyProcessed(existingEmail, pdfRule)) {
+    console.log('Existing email found:', !!existingEmail);
+    console.log('Existing email data:', existingEmail);
+    
+    const isAlreadyProcessed = this.isRuleAlreadyProcessed(existingEmail, pdfRule);
+    console.log('Is rule already processed:', isAlreadyProcessed);
+    
+    if (isAlreadyProcessed) {
+        console.log('Skipping - rule already processed');
         const email = await this.gmailService.getEmailById(messageId, this.sessionId!);
-        const ruleData = existingEmail.convertedRules[pdfRule];
+        const ruleData = existingEmail.converted_rules[pdfRule];
         
         return {
             ...email,
@@ -97,6 +108,7 @@ export class EmailsService {
         };
     }
 
+    console.log('Continuing with processing...');
     const email = await this.gmailService.getEmailById(messageId, this.sessionId!);
     const attachments = this.attachmentsService.detectAttachments(email.payload);
     const downloadDir = this.ensureDownloadDir(outputDir);
@@ -124,6 +136,7 @@ export class EmailsService {
             merged: pdfRule === PdfRule.MAIN_BODY_WITH_ATTACHMENT
         };
     } catch (error) {
+        console.log('Error during processing:', error);
         await this.markRuleAsFailed(messageId, pdfRule, error.message);
         throw error;
     }
@@ -226,8 +239,22 @@ export class EmailsService {
   }
 
   private isRuleAlreadyProcessed(existingEmail: any, pdfRule: PdfRule): boolean {
-      const ruleData = existingEmail.convertedRules?.[pdfRule];
-      return ruleData?.converted === true && ruleData.filePaths?.length > 0;
+      console.log('=== Checking if rule already processed ===');
+      console.log('existingEmail:', existingEmail);
+      console.log('pdfRule:', pdfRule);
+      
+      if (!existingEmail || !existingEmail.converted_rules) {
+          console.log('No existing email or converted_rules - allowing processing');
+          return false;
+      }
+      
+      console.log('converted_rules keys:', Object.keys(existingEmail.converted_rules));
+      const ruleData = existingEmail.converted_rules[pdfRule];
+      console.log('ruleData for', pdfRule, ':', ruleData);
+      
+      const result = ruleData?.converted === true;
+      console.log('Final result:', result);
+      return result;
   }
 
   private async markRuleAsFailed(messageId: string, pdfRule: PdfRule, errorMessage: string): Promise<void> {
@@ -235,7 +262,6 @@ export class EmailsService {
           messageId,
           pdfRule,
           {
-              converted: false,
               error: errorMessage,
               updatedAt: new Date().toISOString()
           }
@@ -266,7 +292,6 @@ export class EmailsService {
               subject: email.subject,
               sender: email.from,
               receivedAt: new Date(email.date),
-              converted: true,
               filePaths: uploadResults.map(r => ({
                   type: this.getFileType(r.fileName, pdfRule),
                   path: r.url

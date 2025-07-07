@@ -8,7 +8,6 @@ interface EmailInsert {
   subject: string;
   sender: string;
   receivedAt: Date;
-  converted?: boolean;
   filePaths?: { type: string; path: string }[];
   gmailId: string;
   threadId: string;
@@ -24,7 +23,6 @@ interface FileUploadResult {
 }
 
 export interface RuleConversionData {
-  converted: boolean;
   filenames?: string[];
   filePaths?: string[];
   error?: string;
@@ -99,7 +97,6 @@ export class SupabaseService {
         subject: email.subject,
         sender: email.sender,
         received_at: email.receivedAt,
-        converted: email.converted || false,
         file_paths: email.filePaths || [],
         gmail_id: email.gmailId,
         thread_id: email.threadId,
@@ -131,7 +128,6 @@ export class SupabaseService {
     const { error } = await this.supabase
       .from('emails')
       .update({ 
-        converted: true, 
         file_paths: filePaths,
         pdf_rule: pdfRule 
       })
@@ -161,31 +157,48 @@ export class SupabaseService {
     pdfRule: PdfRule,
     ruleData: RuleConversionData
   ): Promise<void> {
+    console.log('=== markRuleAsConverted START ===');
+    console.log('Gmail ID:', gmailId);
+    console.log('PDF Rule:', pdfRule);
+    console.log('Rule Data:', ruleData);
+  
     const { data: existingEmail } = await this.supabase
       .from('emails')
       .select('converted_rules')
       .eq('gmail_id', gmailId)
       .single();
-
+  
+    console.log('Existing email data:', existingEmail);
+  
     if (existingEmail) {
+      console.log('Existing converted_rules:', existingEmail.converted_rules);
+      
       const updatedRules = {
         ...existingEmail.converted_rules,
         [pdfRule]: ruleData
       };
-
+      
+      console.log('Updated rules (before save):', updatedRules);
+  
       const { error } = await this.supabase
         .from('emails')
         .update({
           converted_rules: updatedRules,
-          converted: true,
           pdf_rule: pdfRule
         })
         .eq('gmail_id', gmailId);
-
+  
       if (error) {
+        console.log('Update error:', error);
         throw new Error(`Failed to update convertedRules: ${error.message}`);
       }
+      
+      console.log('Successfully updated converted_rules');
+    } else {
+      console.log('No existing email found for Gmail ID:', gmailId);
     }
+    
+    console.log('=== markRuleAsConverted END ===');
   }
 
   async isRuleProcessed(gmailId: string, pdfRule: PdfRule): Promise<boolean> {
