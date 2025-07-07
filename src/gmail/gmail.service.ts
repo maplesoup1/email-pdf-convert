@@ -19,6 +19,7 @@ interface Email {
 
 interface EmailMessage {
    messageId: string;
+   threadId: string;
    subject: string;
    from: string;
    to: string;
@@ -150,6 +151,7 @@ export class GmailService {
 
        return {
            messageId: message.id,
+           threadId: message.threadId || message.id,
            subject,
            from,
            to,

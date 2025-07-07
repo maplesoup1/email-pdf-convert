@@ -6,12 +6,12 @@ import { EmailsService } from './emails.service';
 import { GmailService } from '../gmail/gmail.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { AuthService } from '../auth/auth.service';
-import { PdfProcessingOption } from '../pdf/pdf.service';
+import { PdfRule } from './emails.entity';
 
 interface ConvertEmailDto {
    sessionId: string;
    outputDir?: string;
-   processingOption?: PdfProcessingOption;
+   pdfRule?: PdfRule;
 }
 
 interface EmailListResponse {
@@ -37,7 +37,7 @@ interface ConvertEmailResponse {
    messageId: string;
    subject: string;
    pdfUrls: string[];
-   processingOption: PdfProcessingOption;
+   pdfRule: PdfRule;
    merged: boolean;
    attachmentCount: number;
    pdfAttachmentCount: number;
@@ -148,19 +148,19 @@ export class EmailsController {
        @Param('messageId') messageId: string,
        @Body() body: ConvertEmailDto
    ): Promise<ApiResponse<ConvertEmailResponse>> {
-       const { sessionId, outputDir, processingOption = PdfProcessingOption.MERGE_WITH_ATTACHMENTS } = body;
+       const { sessionId, outputDir, pdfRule = PdfRule.MAIN_BODY_WITH_ATTACHMENT } = body;
        this.validateSessionId(sessionId);
 
        try {
            await this.validateMessageAccess(sessionId, messageId);
            this.emailsService.setSessionId(sessionId);
-           const result = await this.emailsService.processEmail(messageId, processingOption, outputDir);
+           const result = await this.emailsService.processEmail(messageId, pdfRule, outputDir);
 
            return this.createResponse(true, {
                messageId: result.messageId,
                subject: result.subject,
                pdfUrls: result.pdfUrls,
-               processingOption: result.processingOption,
+               pdfRule: result.pdfRule,
                merged: result.merged,
                attachmentCount: result.attachments.length,
                pdfAttachmentCount: result.attachments.filter(a => a.isPdf).length,
@@ -224,10 +224,10 @@ export class EmailsController {
            sessionId: string; 
            messageIds: string[]; 
            outputDir?: string;
-           processingOption?: PdfProcessingOption;
+           pdfRule?: PdfRule;
        }
    ): Promise<ApiResponse<ConvertEmailResponse[]>> {
-       const { sessionId, messageIds, outputDir, processingOption = PdfProcessingOption.MERGE_WITH_ATTACHMENTS } = body;
+       const { sessionId, messageIds, outputDir, pdfRule = PdfRule.MAIN_BODY_WITH_ATTACHMENT } = body;
 
        if (!sessionId || !Array.isArray(messageIds) || messageIds.length === 0) {
            throw new HttpException(
@@ -239,13 +239,13 @@ export class EmailsController {
        try {
            await this.validateMultipleMessageAccess(sessionId, messageIds);
            this.emailsService.setSessionId(sessionId);
-           const results = await this.emailsService.processMultipleEmails(messageIds, processingOption, outputDir);
+           const results = await this.emailsService.processMultipleEmails(messageIds, pdfRule, outputDir);
            
            const responseData: ConvertEmailResponse[] = results.map((r) => ({
                messageId: r.messageId,
                subject: r.subject,
                pdfUrls: r.pdfUrls,
-               processingOption: r.processingOption,
+               pdfRule: r.pdfRule,
                merged: r.merged,
                attachmentCount: r.attachments.length,
                pdfAttachmentCount: r.attachments.filter((a) => a.isPdf).length,
@@ -267,10 +267,10 @@ export class EmailsController {
            sessionId?: string; 
            maxEmails?: number; 
            outputDir?: string;
-           processingOption?: PdfProcessingOption;
+           pdfRule?: PdfRule;
        }
    ): Promise<ApiResponse<any>> {
-       const { sessionId, maxEmails = 10, outputDir, processingOption = PdfProcessingOption.MERGE_WITH_ATTACHMENTS } = body;
+       const { sessionId, maxEmails = 10, outputDir, pdfRule = PdfRule.MAIN_BODY_WITH_ATTACHMENT } = body;
        
        try {
            if (!sessionId) {
@@ -297,7 +297,7 @@ export class EmailsController {
                });
            }
            
-           const result = await this.emailsService.autoProcessAllEmails(sessionId, maxEmails, processingOption, outputDir);
+           const result = await this.emailsService.autoProcessAllEmails(sessionId, maxEmails, pdfRule, outputDir);
            
            return this.createResponse(result.success, {
                ...result,
@@ -313,15 +313,14 @@ export class EmailsController {
        }
    }
 
-   @Get('processing-options')
-   async getProcessingOptions(): Promise<ApiResponse<{ options: PdfProcessingOption[]; descriptions: Record<string, string> }>> {
+   @Get('pdf-rules')
+   async getPdfRules(): Promise<ApiResponse<{ rules: PdfRule[]; descriptions: Record<string, string> }>> {
        return this.createResponse(true, {
-           options: Object.values(PdfProcessingOption),
+           rules: Object.values(PdfRule),
            descriptions: {
-               [PdfProcessingOption.MERGE_WITH_ATTACHMENTS]: 'Merge email body with PDF attachments into one file',
-               [PdfProcessingOption.EMAIL_BODY_ONLY]: 'Generate PDF from email body only',
-               [PdfProcessingOption.SEPARATE_EMAIL_AND_ATTACHMENTS]: 'Generate separate PDFs for email and each attachment',
-               [PdfProcessingOption.ATTACHMENTS_ONLY]: 'Generate PDFs from attachments only, skip email body'
+               [PdfRule.MAIN_BODY_WITH_ATTACHMENT]: 'Merge email body with PDF attachments into one file',
+               [PdfRule.MAIN_BODY_SEPARATE_ATTACHMENT]: 'Generate separate PDFs for email and each attachment',
+               [PdfRule.ATTACHMENT_ONLY]: 'Generate PDFs from attachments only, skip email body'
            }
        });
    }
@@ -344,4 +343,41 @@ export class EmailsController {
            );
        }
    }
+
+   @Get(':messageId/processing-status')
+    async getProcessingStatus(
+        @Param('messageId') messageId: string,
+        @Query('sessionId') sessionId: string
+    ): Promise<ApiResponse<any>> {
+        this.validateSessionId(sessionId);
+
+        try {
+            const status = await this.emailsService.getEmailProcessingStatus(messageId);
+            return this.createResponse(true, status);
+        } catch (error) {
+            throw new HttpException(
+                this.createResponse(false, undefined, error.message),
+                HttpStatus.INTERNAL_SERVER_ERROR
+            );
+        }
+    }
+
+    @Get(':messageId/rule-files/:pdfRule')
+    async getRuleFiles(
+        @Param('messageId') messageId: string,
+        @Param('pdfRule') pdfRule: PdfRule,
+        @Query('sessionId') sessionId: string
+    ): Promise<ApiResponse<{ files: string[] }>> {
+        this.validateSessionId(sessionId);
+
+        try {
+            const files = await this.emailsService.getRuleFiles(messageId, pdfRule);
+            return this.createResponse(true, { files });
+        } catch (error) {
+            throw new HttpException(
+                this.createResponse(false, undefined, error.message),
+                HttpStatus.INTERNAL_SERVER_ERROR
+            );
+        }
+    }
 }

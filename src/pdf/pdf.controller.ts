@@ -1,25 +1,25 @@
 import { Controller, Post, Body, Res, HttpStatus, Get, Param, Query, HttpException } from '@nestjs/common';
-import { Response } from 'express';
-import { PdfService, PdfProcessingOption } from '../pdf/pdf.service';
-import { EmailsService } from '../emails/emails.service';
+import { PdfService } from '../pdf/pdf.service';
+import { EmailsService, EmailProcessResult } from '../emails/emails.service';
 import { GmailService } from '../gmail/gmail.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { HtmlService } from '../html/html.service';
 import { PuppeteerService } from '../puppeteer/puppeteer.service';
+import { PdfRule } from '../emails/emails.entity';
 import * as fs from 'fs';
 import * as path from 'path';
 
 interface ProcessPdfRequest {
   messageId: string;
   sessionId: string;
-  option: PdfProcessingOption;
+  pdfRule: PdfRule;
   outputDir?: string;
 }
 
 interface ProcessMultiplePdfsRequest {
   messageIds: string[];
   sessionId: string;
-  option: PdfProcessingOption;
+  pdfRule: PdfRule;
   outputDir?: string;
 }
 
@@ -31,7 +31,7 @@ interface DirectPdfProcessRequest {
     from: string;
     date: string;
   };
-  option: PdfProcessingOption;
+  pdfRule: PdfRule;
   outputDir?: string;
 }
 
@@ -67,7 +67,10 @@ export class PdfController {
       const result = await operation();
       return this.createResponse(true, result, successMessage);
     } catch (error) {
-      return error.message;
+      throw new HttpException(
+        this.createResponse(false, undefined, errorMessage, error.message),
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
     }
   }
 
@@ -77,7 +80,7 @@ export class PdfController {
     }
   }
 
-  private writeResultFiles(result: any, outputDir: string, option: PdfProcessingOption): string[] {
+  private writeResultFiles(result: any, outputDir: string, pdfRule: PdfRule): string[] {
     this.ensureDirectoryExists(outputDir);
     const outputPaths: string[] = [];
 
@@ -95,7 +98,7 @@ export class PdfController {
 
     if (result.attachmentPdfs) {
       result.attachmentPdfs.forEach((attachmentBuffer: Buffer, index: number) => {
-        const attachmentIndex = option === PdfProcessingOption.SEPARATE_EMAIL_AND_ATTACHMENTS ? index + 1 : index;
+        const attachmentIndex = pdfRule === PdfRule.MAIN_BODY_SEPARATE_ATTACHMENT ? index + 1 : index;
         const attachmentPath = path.join(outputDir, result.filenames[attachmentIndex]);
         fs.writeFileSync(attachmentPath, attachmentBuffer);
         outputPaths.push(attachmentPath);
@@ -106,75 +109,76 @@ export class PdfController {
   }
 
   @Post('process-email')
-  async processEmailToPdf(@Body() request: ProcessPdfRequest, @Res() res: Response) {
-    const response = await this.handleRequest(
-      async () => {
-        this.emailsService.setSessionId(request.sessionId);
-        return await this.emailsService.processEmail(
-          request.messageId,
-          request.option,
-          request.outputDir
-        );
-      },
-      'Email processed to PDF successfully',
-      'Failed to process email to PDF'
-    );
-
-    return res.status(response.success ? HttpStatus.OK : HttpStatus.INTERNAL_SERVER_ERROR).json(response);
+  async processEmailToPdf(@Body() request: ProcessPdfRequest): Promise<ApiResponse<EmailProcessResult>> {
+    try {
+      this.emailsService.setSessionId(request.sessionId);
+      const result = await this.emailsService.processEmail(
+        request.messageId,
+        request.pdfRule,
+        request.outputDir
+      );
+      
+      return this.createResponse(true, result, 'Email processed to PDF successfully');
+    } catch (error) {
+      throw new HttpException(
+        this.createResponse(false, undefined, 'Failed to process email to PDF', error.message),
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Post('process-multiple-emails')
-  async processMultipleEmailsToPdf(@Body() request: ProcessMultiplePdfsRequest, @Res() res: Response) {
-    const response = await this.handleRequest(
-      async () => {
-        this.emailsService.setSessionId(request.sessionId);
-        return await this.emailsService.processMultipleEmails(
-          request.messageIds,
-          request.option,
-          request.outputDir
-        );
-      },
-      'Multiple emails processed to PDF successfully',
-      'Failed to process multiple emails to PDF'
-    );
-
-    return res.status(response.success ? HttpStatus.OK : HttpStatus.INTERNAL_SERVER_ERROR).json(response);
+  async processMultipleEmailsToPdf(@Body() request: ProcessMultiplePdfsRequest): Promise<ApiResponse<EmailProcessResult[]>> {
+    try {
+      this.emailsService.setSessionId(request.sessionId);
+      const result = await this.emailsService.processMultipleEmails(
+        request.messageIds,
+        request.pdfRule,
+        request.outputDir
+      );
+      
+      return this.createResponse(true, result, 'Multiple emails processed to PDF successfully');
+    } catch (error) {
+      throw new HttpException(
+        this.createResponse(false, undefined, 'Failed to process multiple emails to PDF', error.message),
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Post('process-direct')
-  async processDirectPdf(@Body() request: DirectPdfProcessRequest, @Res() res: Response) {
-    const response = await this.handleRequest(
-      async () => {
-        const emailPdfBuffer = await this.puppeteerService.convertHtmlToPdf(
-          request.emailHtml,
-          null!,
-          true
-        );
+  async processDirectPdf(@Body() request: DirectPdfProcessRequest) {
+    try {
+      const emailPdfBuffer = await this.puppeteerService.convertHtmlToPdf(
+        request.emailHtml,
+        null!,
+        true
+      );
 
-        const result = await this.pdfService.processPdfWithOptions(
-          emailPdfBuffer,
-          request.attachmentFiles,
-          request.emailHeaders,
-          request.attachmentFiles.map(f => path.basename(f)),
-          request.option,
-          'direct_' + Date.now()
-        );
+      const result = await this.pdfService.processPdfWithRule(
+        emailPdfBuffer,
+        request.attachmentFiles,
+        request.emailHeaders,
+        request.attachmentFiles.map(f => path.basename(f)),
+        request.pdfRule,
+        'direct_' + Date.now()
+      );
 
-        const outputDir = request.outputDir || './downloads';
-        const outputPaths = this.writeResultFiles(result, outputDir, request.option);
+      const outputDir = request.outputDir || './downloads';
+      const outputPaths = this.writeResultFiles(result, outputDir, request.pdfRule);
 
-        return {
-          option: result.option,
-          filenames: result.filenames,
-          outputPaths,
-          processedFiles: outputPaths.length
-        };
-      },
-      'Direct PDF processing completed successfully',
-      'Failed to process direct PDF'
-    );
-
-    return res.status(response.success ? HttpStatus.OK : HttpStatus.INTERNAL_SERVER_ERROR).json(response);
+      return this.createResponse(true, {
+        pdfRule: request.pdfRule,
+        filenames: result.filenames,
+        outputPaths,
+        processedFiles: outputPaths.length
+      }, 'Direct PDF processing completed successfully');
+    } catch (error) {
+      throw new HttpException(
+        this.createResponse(false, undefined, 'Failed to process direct PDF', error.message),
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Post('merge-pdfs')
@@ -188,56 +192,55 @@ export class PdfController {
         date: string;
       };
       outputPath: string;
-    },
-    @Res() res: Response
+    }
   ) {
-    const response = await this.handleRequest(
-      async () => {
-        const emailPdfBuffer = fs.readFileSync(body.emailPdfPath);
-        const attachmentNames = body.attachmentPdfPaths.map(p => path.basename(p));
+    try {
+      const emailPdfBuffer = fs.readFileSync(body.emailPdfPath);
+      const attachmentNames = body.attachmentPdfPaths.map(p => path.basename(p));
+      const messageId = 'merge_' + Date.now();
 
-        const mergedPdfBuffer = await this.pdfService.mergePDFs(
-          emailPdfBuffer,
-          body.attachmentPdfPaths,
-          body.emailHeaders,
-          attachmentNames
-        );
+      const result = await this.pdfService.processPdfWithRule(
+        emailPdfBuffer,
+        body.attachmentPdfPaths,
+        body.emailHeaders,
+        attachmentNames,
+        PdfRule.MAIN_BODY_WITH_ATTACHMENT,
+        messageId
+      );
 
-        fs.writeFileSync(body.outputPath, mergedPdfBuffer);
+      fs.writeFileSync(body.outputPath, result.mergedPdf!);
 
-        return {
-          outputPath: body.outputPath,
-          size: mergedPdfBuffer.length
-        };
-      },
-      'PDFs merged successfully',
-      'Failed to merge PDFs'
-    );
-
-    return res.status(response.success ? HttpStatus.OK : HttpStatus.INTERNAL_SERVER_ERROR).json(response);
+      return this.createResponse(true, {
+        outputPath: body.outputPath,
+        size: result.mergedPdf!.length
+      }, 'PDFs merged successfully');
+    } catch (error) {
+      throw new HttpException(
+        this.createResponse(false, undefined, 'Failed to merge PDFs', error.message),
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Get('page-count/:messageId')
   async getEmailPageCount(
     @Param('messageId') messageId: string,
-    @Query('sessionId') sessionId: string,
-    @Res() res: Response
+    @Query('sessionId') sessionId: string
   ) {
     if (!sessionId) {
       throw new HttpException('SessionId is required', HttpStatus.BAD_REQUEST);
     }
 
-    const response = await this.handleRequest(
-      async () => {
-        this.emailsService.setSessionId(sessionId);
-        const pageCount = await this.emailsService.getEmailPageCount(messageId);
-        return { pageCount };
-      },
-      'Page count retrieved successfully',
-      'Failed to get page count'
-    );
-
-    return res.status(response.success ? HttpStatus.OK : HttpStatus.INTERNAL_SERVER_ERROR).json(response);
+    try {
+      this.emailsService.setSessionId(sessionId);
+      const pageCount = await this.emailsService.getEmailPageCount(messageId);
+      return this.createResponse(true, { pageCount }, 'Page count retrieved successfully');
+    } catch (error) {
+      throw new HttpException(
+        this.createResponse(false, undefined, 'Failed to get page count', error.message),
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   @Post('generate-filename')
@@ -245,22 +248,31 @@ export class PdfController {
     @Body() body: {
       subject: string;
       messageId: string;
-      isMerged?: boolean;
-    },
-    @Res() res: Response
+      type?: string;
+    }
   ) {
-    const response = await this.handleRequest(
-      async () => ({
-        filename: this.pdfService.generateSafeFileName(
-          body.subject,
-          body.messageId,
-          body.isMerged || false
-        )
-      }),
-      'Safe filename generated successfully',
-      'Failed to generate safe filename'
-    );
+    try {
+      const emailHeaders = { subject: body.subject, from: '', date: '' };
+      const filename = this.pdfService.generateFilename(emailHeaders, body.messageId, body.type || 'email');
+      
+      return this.createResponse(true, { filename }, 'Safe filename generated successfully');
+    } catch (error) {
+      throw new HttpException(
+        this.createResponse(false, undefined, 'Failed to generate safe filename', error.message),
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
 
-    return res.status(response.success ? HttpStatus.OK : HttpStatus.INTERNAL_SERVER_ERROR).json(response);
+  @Get('rules')
+  async getPdfRules() {
+    return this.createResponse(true, {
+      rules: Object.values(PdfRule),
+      descriptions: {
+        [PdfRule.MAIN_BODY_WITH_ATTACHMENT]: 'Merge email body with PDF attachments into one file',
+        [PdfRule.MAIN_BODY_SEPARATE_ATTACHMENT]: 'Generate separate PDFs for email and each attachment',
+        [PdfRule.ATTACHMENT_ONLY]: 'Generate PDFs from attachments only, skip email body'
+      }
+    }, 'PDF rules retrieved successfully');
   }
 }

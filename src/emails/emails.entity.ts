@@ -1,4 +1,3 @@
-// src/emails/emails.entity.ts
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -12,7 +11,6 @@ export enum PdfRule {
   ATTACHMENT_ONLY = 'attachment_only',
 }
 
-
 @Entity('emails')
 export class Email {
   @PrimaryGeneratedColumn('uuid')
@@ -24,34 +22,43 @@ export class Email {
   @Column()
   sender: string;
 
-  @Column({ type: 'timestamptz' })
+  @Column({ type: 'timestamptz', name: 'received_at' })
   receivedAt: Date;
 
-  @Column({ default: false })
-  converted: boolean;
-
-  @Column({ nullable: true })
+  @Column({ nullable: true, name: 'pdf_url' })
   pdfUrl: string;
 
   @Column({
     type: 'enum',
     enum: PdfRule,
     nullable: true,
+    name: 'pdf_rule'
   })
   pdfRule: PdfRule;
   
-  @CreateDateColumn()
+  @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
-  @Column({ unique: true })
+  @Column({ unique: true, name: 'gmail_id' })
   gmailId: string;
 
-  @Column()
+  @Column({ name: 'thread_id' })
   threadId: string;
 
-  @Column({ type: 'jsonb', nullable: true })
+  @Column({ type: 'jsonb', nullable: true, name: 'file_paths' })
   filePaths: {
     type: string;
     path: string;
   }[];
+
+  @Column({ type: 'jsonb', default: {}, name: 'converted_rules' })
+  convertedRules: {
+    [rule: string]: {
+      converted: boolean;
+      filenames?: string[];
+      filePaths?: string[];
+      error?: string;
+      updatedAt: string;
+    };
+  };
 }

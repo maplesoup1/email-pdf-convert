@@ -2,21 +2,33 @@ import { Injectable } from '@nestjs/common';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { PdfRule } from '../emails/emails.entity';
 
 interface EmailInsert {
   subject: string;
   sender: string;
-  received_at: Date;
+  receivedAt: Date;
   converted?: boolean;
-  file_paths?: string[];
-  gmail_id: string;
-  thread_id: string;
+  filePaths?: { type: string; path: string }[];
+  gmailId: string;
+  threadId: string;
+  pdfRule?: PdfRule;
+  convertedRules?: { [rule: string]: RuleConversionData };
 }
 
 interface FileUploadResult {
   url: string;
   path: string;
   fullPath: string;
+  fileName: string;
+}
+
+export interface RuleConversionData {
+  converted: boolean;
+  filenames?: string[];
+  filePaths?: string[];
+  error?: string;
+  updatedAt: string;
 }
 
 @Injectable()
@@ -36,50 +48,45 @@ export class SupabaseService {
     fileName: string, 
     folder: string = 'converted-emails'
   ): Promise<FileUploadResult> {
-    try {
-      const fileBuffer = fs.readFileSync(filePath);
-      const safeFileName = this.sanitizeFileName(fileName);
-      const storagePath = `${folder}/${safeFileName}`;
-      
-      const { data, error } = await this.supabase.storage
-        .from(this.bucketName)
-        .upload(storagePath, fileBuffer, {
-          contentType: 'application/pdf',
-          upsert: true
-        });
+    const fileBuffer = fs.readFileSync(filePath);
+    const safeFileName = this.sanitizeFileName(fileName);
+    const storagePath = `${folder}/${safeFileName}`;
+    
+    const { data, error } = await this.supabase.storage
+      .from(this.bucketName)
+      .upload(storagePath, fileBuffer, {
+        contentType: 'application/pdf',
+        upsert: true
+      });
 
-      if (error) {
-        throw new Error(`PDF upload failed: ${error.message}`);
-      }
-
-      const { data: urlData } = this.supabase.storage
-        .from(this.bucketName)
-        .getPublicUrl(storagePath);
-
-      return {
-        url: urlData.publicUrl,
-        path: storagePath,
-        fullPath: data.path
-      };
-    } catch (error) {
-      throw new Error(`Failed to upload PDF: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    if (error) {
+      throw new Error(`PDF upload failed: ${error.message}`);
     }
+
+    const { data: urlData } = this.supabase.storage
+      .from(this.bucketName)
+      .getPublicUrl(storagePath);
+
+    return {
+      url: urlData.publicUrl,
+      path: storagePath,
+      fullPath: data.path,
+      fileName: safeFileName
+    };
   }
 
   async uploadMultiplePdfs(
     filePaths: string[], 
-    folder: string = 'converted-emails'
+    folder: string = 'converted-emails',
+    originalFileNames?: string[]
   ): Promise<FileUploadResult[]> {
     const results: FileUploadResult[] = [];
     
-    for (const filePath of filePaths) {
-      try {
-        const fileName = path.basename(filePath);
-        const result = await this.uploadPdf(filePath, fileName, folder);
-        results.push(result);
-      } catch (error) {
-        console.error(`Failed to upload ${filePath}:`, error);
-      }
+    for (let i = 0; i < filePaths.length; i++) {
+      const filePath = filePaths[i];
+      const fileName = originalFileNames ? originalFileNames[i] : path.basename(filePath);
+      const result = await this.uploadPdf(filePath, fileName, folder);
+      results.push(result);
     }
     
     return results;
@@ -88,7 +95,17 @@ export class SupabaseService {
   async insertEmail(email: EmailInsert) {
     const { data, error } = await this.supabase
       .from('emails')
-      .insert([{ ...email }])
+      .insert([{
+        subject: email.subject,
+        sender: email.sender,
+        received_at: email.receivedAt,
+        converted: email.converted || false,
+        file_paths: email.filePaths || [],
+        gmail_id: email.gmailId,
+        thread_id: email.threadId,
+        pdf_rule: email.pdfRule,
+        converted_rules: email.convertedRules || {}
+      }])
       .select();
 
     if (error) {
@@ -105,12 +122,19 @@ export class SupabaseService {
       .replace(/_+/g, '_')
       .substring(0, 100);
   }
-  
 
-  async markAsConverted(gmailId: string, filePaths: string[]) {
+  async markAsConverted(
+    gmailId: string, 
+    filePaths: { type: string; path: string }[], 
+    pdfRule: PdfRule
+  ) {
     const { error } = await this.supabase
       .from('emails')
-      .update({ converted: true, file_paths: filePaths })
+      .update({ 
+        converted: true, 
+        file_paths: filePaths,
+        pdf_rule: pdfRule 
+      })
       .eq('gmail_id', gmailId);
 
     if (error) {
@@ -130,5 +154,127 @@ export class SupabaseService {
     }
 
     return data;
+  }
+
+  async markRuleAsConverted(
+    gmailId: string,
+    pdfRule: PdfRule,
+    ruleData: RuleConversionData
+  ): Promise<void> {
+    const { data: existingEmail } = await this.supabase
+      .from('emails')
+      .select('converted_rules')
+      .eq('gmail_id', gmailId)
+      .single();
+
+    if (existingEmail) {
+      const updatedRules = {
+        ...existingEmail.converted_rules,
+        [pdfRule]: ruleData
+      };
+
+      const { error } = await this.supabase
+        .from('emails')
+        .update({
+          converted_rules: updatedRules,
+          converted: true,
+          pdf_rule: pdfRule
+        })
+        .eq('gmail_id', gmailId);
+
+      if (error) {
+        throw new Error(`Failed to update convertedRules: ${error.message}`);
+      }
+    }
+  }
+
+  async isRuleProcessed(gmailId: string, pdfRule: PdfRule): Promise<boolean> {
+    const { data: email } = await this.supabase
+      .from('emails')
+      .select('converted_rules')
+      .eq('gmail_id', gmailId)
+      .single();
+
+    if (!email) return false;
+
+    const ruleData = email.converted_rules?.[pdfRule];
+    return ruleData?.converted === true && ruleData.filePaths?.length > 0;
+  }
+
+  async getConvertedRules(gmailId: string): Promise<{ [rule: string]: RuleConversionData } | null> {
+    const { data: email } = await this.supabase
+      .from('emails')
+      .select('converted_rules')
+      .eq('gmail_id', gmailId)
+      .single();
+
+    return email?.converted_rules || null;
+  }
+
+  async getRuleFiles(gmailId: string, pdfRule: PdfRule): Promise<string[]> {
+    const { data: email } = await this.supabase
+      .from('emails')
+      .select('converted_rules')
+      .eq('gmail_id', gmailId)
+      .single();
+
+    if (!email) return [];
+
+    const ruleData = email.converted_rules?.[pdfRule];
+    return ruleData?.filePaths || [];
+  }
+
+  async getEmailProcessingStatus(gmailId: string): Promise<{
+    gmailId: string;
+    totalRules: number;
+    processedRules: number;
+    failedRules: number;
+    ruleStatus: { [rule: string]: { processed: boolean; failed: boolean; filePaths?: string[] } };
+  }> {
+    const { data: email } = await this.supabase
+      .from('emails')
+      .select('converted_rules')
+      .eq('gmail_id', gmailId)
+      .single();
+
+    if (!email) {
+      return {
+        gmailId,
+        totalRules: 0,
+        processedRules: 0,
+        failedRules: 0,
+        ruleStatus: {}
+      };
+    }
+
+    const convertedRules = email.converted_rules || {};
+    const allRules = Object.values(PdfRule);
+    
+    let processedCount = 0;
+    let failedCount = 0;
+    const ruleStatus: { [rule: string]: { processed: boolean; failed: boolean; filePaths?: string[] } } = {};
+
+    for (const rule of allRules) {
+      const ruleData = convertedRules[rule];
+      const processed = ruleData?.converted === true;
+      const failed = ruleData?.converted === false && ruleData.error;
+
+      ruleStatus[rule] = {
+        processed,
+        failed: !!failed,
+        filePaths: ruleData?.filePaths
+      };
+
+      if (processed) processedCount++;
+      if (failed) failedCount++;
+    }
+
+    return {
+      gmailId,
+      totalRules: allRules.length,
+      processedRules: processedCount,
+      failedRules: failedCount,
+      ruleStatus
+    };
   }
 }
