@@ -21,6 +21,8 @@ import { DemergeService } from './demerge/demerge.service';
 // Custom modules
 import { EmailsModule } from './emails/emails.module';
 import { SupabaseService } from './supabase/supabase.service';
+import { AutoProcessService } from './auto/auto.service';
+import { AutoProcessController } from './auto/auto.controller';
 
 @Module({
   imports: [
@@ -33,6 +35,7 @@ import { SupabaseService } from './supabase/supabase.service';
     DemergeController,
     DownloadController,
     PdfController,
+    AutoProcessController,
   ],
   providers: [
     AuthService,
@@ -44,6 +47,7 @@ import { SupabaseService } from './supabase/supabase.service';
     DownloadService,
     DemergeService,
     SupabaseService,
+    AutoProcessService,
   ],
 })
 export class AppModule {}

@@ -177,4 +177,50 @@ export class GmailService {
        
        return filePath;
    }
+
+   async getRecentEmails(sessionId: string, maxResults: number = 50): Promise<EmailListResponse> {
+    await this.ensureAuthenticated(sessionId);
+    
+    const twentyFourHoursAgo = new Date();
+    twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+    
+    const afterDate = twentyFourHoursAgo.toISOString().split('T')[0].replace(/-/g, '/');
+    
+    const listResponse = await this.gmail.users.messages.list({
+        userId: 'me',
+        maxResults: parseInt(maxResults.toString()),
+        q: `after:${afterDate}`
+    });
+
+    const emails: Email[] = [];
+    for (const message of listResponse.data.messages || []) {
+        const messageResponse = await this.gmail.users.messages.get({
+            userId: 'me',
+            id: message.id,
+            format: 'metadata',
+            metadataHeaders: ['Subject', 'From', 'Date']
+        });
+        
+        const headers = messageResponse.data.payload.headers;
+        const receivedDate = new Date(parseInt(messageResponse.data.internalDate));
+        
+        if (receivedDate >= twentyFourHoursAgo) {
+            emails.push({
+                messageId: message.id,
+                subject: headers.find(h => h.name === 'Subject')?.value || '',
+                from: headers.find(h => h.name === 'From')?.value || '',
+                date: headers.find(h => h.name === 'Date')?.value || '',
+                receiveDate: receivedDate.toISOString(),
+                snippet: messageResponse.data.snippet
+            });
+        }
+    }
+
+    emails.sort((a, b) => new Date(b.receiveDate).getTime() - new Date(a.receiveDate).getTime());
+
+    return {
+        emails,
+        nextPageToken: listResponse.data.nextPageToken
+    };
+}
 }
