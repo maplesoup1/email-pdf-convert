@@ -46,9 +46,24 @@ export class SupabaseService {
     fileName: string, 
     folder: string = 'converted-emails'
   ): Promise<FileUploadResult> {
+    console.log('📤 Starting PDF upload...');
+    console.log('📁 File path:', filePath);
+    console.log('📄 File name:', fileName);
+    console.log('📂 Folder:', folder);
+    
+    // Check if file exists
+    if (!fs.existsSync(filePath)) {
+      console.error('❌ File does not exist:', filePath);
+      throw new Error(`File does not exist: ${filePath}`);
+    }
+    
     const fileBuffer = fs.readFileSync(filePath);
+    console.log('📏 File buffer size:', fileBuffer.length);
+    
     const safeFileName = this.sanitizeFileName(fileName);
     const storagePath = `${folder}/${safeFileName}`;
+    console.log('🛡️ Safe file name:', safeFileName);
+    console.log('📍 Storage path:', storagePath);
     
     const { data, error } = await this.supabase.storage
       .from(this.bucketName)
@@ -58,12 +73,17 @@ export class SupabaseService {
       });
 
     if (error) {
+      console.error('❌ Upload error:', error);
       throw new Error(`PDF upload failed: ${error.message}`);
     }
+
+    console.log('✅ Upload successful:', data);
 
     const { data: urlData } = this.supabase.storage
       .from(this.bucketName)
       .getPublicUrl(storagePath);
+
+    console.log('🔗 Public URL:', urlData.publicUrl);
 
     return {
       url: urlData.publicUrl,

@@ -1,7 +1,8 @@
 import { Controller, Post, Body, Res, HttpStatus, Get, Param, Query, HttpException } from '@nestjs/common';
 import { PdfService } from '../pdf/pdf.service';
-import { EmailsService, EmailProcessResult } from '../emails/emails.service';
+import { EmailsService, EmailProcessResult, EmailProvider } from '../emails/emails.service';
 import { GmailService } from '../gmail/gmail.service';
+import { OutlookService } from '../outlook/outlook.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { HtmlService } from '../html/html.service';
 import { PuppeteerService } from '../puppeteer/puppeteer.service';
@@ -12,6 +13,7 @@ import * as path from 'path';
 interface ProcessPdfRequest {
   messageId: string;
   sessionId: string;
+  provider: EmailProvider;
   pdfRule: PdfRule;
   outputDir?: string;
 }
@@ -19,6 +21,7 @@ interface ProcessPdfRequest {
 interface ProcessMultiplePdfsRequest {
   messageIds: string[];
   sessionId: string;
+  provider: EmailProvider;
   pdfRule: PdfRule;
   outputDir?: string;
 }
@@ -48,6 +51,7 @@ export class PdfController {
     private readonly pdfService: PdfService,
     private readonly emailsService: EmailsService,
     private readonly gmailService: GmailService,
+    private readonly outlookService: OutlookService,
     private readonly attachmentsService: AttachmentsService,
     private readonly htmlService: HtmlService,
     private readonly puppeteerService: PuppeteerService,
@@ -71,6 +75,15 @@ export class PdfController {
         this.createResponse(false, undefined, errorMessage, error.message),
         HttpStatus.INTERNAL_SERVER_ERROR
       );
+    }
+  }
+
+  private validateProvider(provider?: EmailProvider): void {
+    if (!provider || !Object.values(EmailProvider).includes(provider)) {
+      throw new HttpException({
+        success: false,
+        error: 'Valid provider (gmail/outlook) is required'
+      }, HttpStatus.BAD_REQUEST);
     }
   }
 
@@ -110,18 +123,21 @@ export class PdfController {
 
   @Post('process-email')
   async processEmailToPdf(@Body() request: ProcessPdfRequest): Promise<ApiResponse<EmailProcessResult>> {
+    this.validateProvider(request.provider);
+    
     try {
-      this.emailsService.setSessionId(request.sessionId);
+      await this.emailsService.setSessionId(request.sessionId, request.provider);
       const result = await this.emailsService.processEmail(
         request.messageId,
         request.pdfRule,
-        request.outputDir
+        request.outputDir,
+        request.provider
       );
       
-      return this.createResponse(true, result, 'Email processed to PDF successfully');
+      return this.createResponse(true, result, `Email processed to PDF successfully via ${request.provider}`);
     } catch (error) {
       throw new HttpException(
-        this.createResponse(false, undefined, 'Failed to process email to PDF', error.message),
+        this.createResponse(false, undefined, `Failed to process ${request.provider} email to PDF`, error.message),
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
@@ -129,18 +145,21 @@ export class PdfController {
 
   @Post('process-multiple-emails')
   async processMultipleEmailsToPdf(@Body() request: ProcessMultiplePdfsRequest): Promise<ApiResponse<EmailProcessResult[]>> {
+    this.validateProvider(request.provider);
+    
     try {
-      this.emailsService.setSessionId(request.sessionId);
+      await this.emailsService.setSessionId(request.sessionId, request.provider);
       const result = await this.emailsService.processMultipleEmails(
         request.messageIds,
         request.pdfRule,
-        request.outputDir
+        request.outputDir,
+        request.provider
       );
       
-      return this.createResponse(true, result, 'Multiple emails processed to PDF successfully');
+      return this.createResponse(true, result, `Multiple ${request.provider} emails processed to PDF successfully`);
     } catch (error) {
       throw new HttpException(
-        this.createResponse(false, undefined, 'Failed to process multiple emails to PDF', error.message),
+        this.createResponse(false, undefined, `Failed to process multiple ${request.provider} emails to PDF`, error.message),
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
@@ -225,19 +244,22 @@ export class PdfController {
   @Get('page-count/:messageId')
   async getEmailPageCount(
     @Param('messageId') messageId: string,
-    @Query('sessionId') sessionId: string
+    @Query('sessionId') sessionId: string,
+    @Query('provider') provider: EmailProvider
   ) {
     if (!sessionId) {
       throw new HttpException('SessionId is required', HttpStatus.BAD_REQUEST);
     }
 
+    this.validateProvider(provider);
+
     try {
-      this.emailsService.setSessionId(sessionId);
-      const pageCount = await this.emailsService.getEmailPageCount(messageId);
-      return this.createResponse(true, { pageCount }, 'Page count retrieved successfully');
+      await this.emailsService.setSessionId(sessionId, provider);
+      const pageCount = await this.emailsService.getEmailPageCount(messageId, provider);
+      return this.createResponse(true, { pageCount, provider }, `Page count retrieved successfully from ${provider}`);
     } catch (error) {
       throw new HttpException(
-        this.createResponse(false, undefined, 'Failed to get page count', error.message),
+        this.createResponse(false, undefined, `Failed to get page count from ${provider}`, error.message),
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
@@ -274,5 +296,89 @@ export class PdfController {
         [PdfRule.ATTACHMENT_ONLY]: 'Generate PDFs from attachments only, skip email body'
       }
     }, 'PDF rules retrieved successfully');
+  }
+
+  @Get('providers')
+  async getProviders() {
+    return this.createResponse(true, {
+      providers: Object.values(EmailProvider),
+      descriptions: {
+        [EmailProvider.GMAIL]: 'Google Gmail email processing',
+        [EmailProvider.OUTLOOK]: 'Microsoft Outlook/Hotmail email processing'
+      }
+    }, 'Email providers retrieved successfully');
+  }
+
+  @Post('auto-process')
+  async autoProcessEmailsToPdf(
+    @Body() body: {
+      sessionId: string;
+      provider: EmailProvider;
+      maxEmails?: number;
+      pdfRule?: PdfRule;
+      outputDir?: string;
+    }
+  ) {
+    const { sessionId, provider, maxEmails = 10, pdfRule = PdfRule.MAIN_BODY_WITH_ATTACHMENT, outputDir } = body;
+    
+    this.validateProvider(provider);
+
+    try {
+      const result = await this.emailsService.autoProcessAllEmails(
+        sessionId,
+        provider,
+        maxEmails,
+        pdfRule,
+        outputDir
+      );
+
+      return this.createResponse(true, result, `Auto-processing completed for ${provider}`);
+    } catch (error) {
+      throw new HttpException(
+        this.createResponse(false, undefined, `Failed to auto-process ${provider} emails`, error.message),
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('processing-status/:messageId')
+  async getProcessingStatus(
+    @Param('messageId') messageId: string,
+    @Query('sessionId') sessionId: string
+  ) {
+    if (!sessionId) {
+      throw new HttpException('SessionId is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const status = await this.emailsService.getEmailProcessingStatus(messageId);
+      return this.createResponse(true, status, 'Processing status retrieved successfully');
+    } catch (error) {
+      throw new HttpException(
+        this.createResponse(false, undefined, 'Failed to get processing status', error.message),
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Get('rule-files/:messageId/:pdfRule')
+  async getRuleFiles(
+    @Param('messageId') messageId: string,
+    @Param('pdfRule') pdfRule: PdfRule,
+    @Query('sessionId') sessionId: string
+  ) {
+    if (!sessionId) {
+      throw new HttpException('SessionId is required', HttpStatus.BAD_REQUEST);
+    }
+
+    try {
+      const files = await this.emailsService.getRuleFiles(messageId, pdfRule);
+      return this.createResponse(true, { files, pdfRule }, 'Rule files retrieved successfully');
+    } catch (error) {
+      throw new HttpException(
+        this.createResponse(false, undefined, 'Failed to get rule files', error.message),
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 }

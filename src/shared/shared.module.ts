@@ -2,6 +2,7 @@
 import { Module } from '@nestjs/common';
 import { ScheduleModule } from '@nestjs/schedule';
 import { GmailService } from '../gmail/gmail.service';
+import { OutlookService } from '../outlook/outlook.service';
 import { HtmlService } from '../html/html.service';
 import { PdfService } from '../pdf/pdf.service';
 import { PuppeteerService } from '../puppeteer/puppeteer.service';
@@ -25,6 +26,7 @@ import { EmailsService } from '../emails/emails.service'; // 添加这行
     AuthService,
     EmailsService,      // 添加这行
     AutoProcessService,
+    OutlookService, // 添加 OutlookService
   ],
   exports: [
     GmailService,
@@ -36,6 +38,7 @@ import { EmailsService } from '../emails/emails.service'; // 添加这行
     AuthService,
     EmailsService,      // 添加这行
     AutoProcessService,
+    OutlookService, 
   ],
 })
 export class SharedModule {}

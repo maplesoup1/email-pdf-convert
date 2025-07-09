@@ -3,12 +3,18 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { PDFDocument } from 'pdf-lib';
 import { GmailService } from '../gmail/gmail.service';
+import { OutlookService } from '../outlook/outlook.service';
 import { AttachmentsService } from '../attachments/attachments.service';
 import { PdfService } from '../pdf/pdf.service';
 import { HtmlService } from '../html/html.service';
 import { PuppeteerService } from '../puppeteer/puppeteer.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PdfRule } from '../emails/emails.entity';
+
+export enum EmailProvider {
+  GMAIL = 'gmail',
+  OUTLOOK = 'outlook'
+}
 
 export interface EmailProcessResult {
   messageId: string;
@@ -25,6 +31,7 @@ export interface EmailProcessResult {
   merged: boolean;
   skipped?: boolean;
   attachmentPageInfo?: AttachmentPageInfo[];
+  provider: EmailProvider;
 }
 
 export interface AttachmentPageInfo {
@@ -49,15 +56,18 @@ export interface AutoProcessResult {
    emailResults: EmailProcessResult[];
    errors: string[];
    processingTime: number;
+   provider: EmailProvider;
 }
 
 @Injectable()
 export class EmailsService {
   private sessionId: string | null = null;
   private authenticatedUserEmail: string | null = null;
+  private currentProvider: EmailProvider | null = null;
 
   constructor(
       private readonly gmailService: GmailService,
+      private readonly outlookService: OutlookService,
       private readonly attachmentsService: AttachmentsService,
       private readonly pdfService: PdfService,
       private readonly htmlService: HtmlService,
@@ -65,26 +75,43 @@ export class EmailsService {
       private readonly supabaseService: SupabaseService,
   ) {}
 
-  async setSessionId(sessionId: string): Promise<void> {
+  async setSessionId(sessionId: string, provider: EmailProvider): Promise<void> {
       this.sessionId = sessionId;
-      this.gmailService.setSessionId(sessionId);
+      this.currentProvider = provider;
       
-      try {
-          this.authenticatedUserEmail = await this.gmailService.getAuthenticatedUserEmail(sessionId);
-      } catch (error) {
-          this.authenticatedUserEmail = null;
+      if (provider === EmailProvider.GMAIL) {
+          this.gmailService.setSessionId(sessionId);
+          try {
+              this.authenticatedUserEmail = await this.gmailService.getAuthenticatedUserEmail(sessionId);
+          } catch (error) {
+              this.authenticatedUserEmail = null;
+          }
+      } else if (provider === EmailProvider.OUTLOOK) {
+          this.outlookService.setSessionId(sessionId);
+          try {
+              this.authenticatedUserEmail = await this.outlookService.getAuthenticatedUserEmail(sessionId);
+          } catch (error) {
+              this.authenticatedUserEmail = null;
+          }
       }
   }
 
   async processEmail(
     messageId: string, 
     pdfRule: PdfRule = PdfRule.MAIN_BODY_WITH_ATTACHMENT,
-    outputDir?: string
+    outputDir?: string,
+    provider?: EmailProvider
   ): Promise<EmailProcessResult> {
     console.log('=== Processing Email Start ===');
     console.log('Message ID:', messageId);
     console.log('PDF Rule:', pdfRule);
+    console.log('Provider:', provider || this.currentProvider);
     
+    const currentProvider = provider || this.currentProvider;
+    if (!currentProvider) {
+        throw new Error('Provider must be specified');
+    }
+
     const existingEmail = await this.supabaseService.findEmailByGmailId(messageId);
     console.log('Existing email found:', !!existingEmail);
     console.log('Existing email data:', existingEmail);
@@ -94,7 +121,7 @@ export class EmailsService {
     
     if (isAlreadyProcessed) {
         console.log('Skipping - rule already processed');
-        const email = await this.gmailService.getEmailById(messageId, this.sessionId!);
+        const email = await this.getEmailById(messageId, currentProvider);
         const ruleData = existingEmail.converted_rules[pdfRule];
         
         return {
@@ -104,13 +131,35 @@ export class EmailsService {
             pdfRule: pdfRule,
             merged: pdfRule === PdfRule.MAIN_BODY_WITH_ATTACHMENT,
             skipped: true,
-            attachmentPageInfo: []
+            attachmentPageInfo: [],
+            provider: currentProvider
         };
     }
 
     console.log('Continuing with processing...');
-    const email = await this.gmailService.getEmailById(messageId, this.sessionId!);
-    const attachments = this.attachmentsService.detectAttachments(email.payload);
+    const email = await this.getEmailById(messageId, currentProvider);
+    console.log('Email fetched - Subject:', email.subject);
+    console.log('Email body length:', email.body?.length);
+    console.log('Email isHtml:', email.isHtml);
+    
+    let attachments: any[] = [];
+    if (currentProvider === EmailProvider.GMAIL) {
+        attachments = this.attachmentsService.detectAttachments(email.payload);
+        console.log('Gmail attachments detected:', attachments.length);
+    } else if (currentProvider === EmailProvider.OUTLOOK) {
+        try {
+            const outlookAttachments = await this.outlookService.getEmailAttachments(messageId, this.sessionId!);
+            attachments = this.attachmentsService.formatOutlookAttachments(outlookAttachments);
+            console.log('Outlook attachments from separate call:', attachments.length);
+        } catch (attachmentError) {
+            console.warn('Failed to get Outlook attachments:', attachmentError);
+            attachments = [];
+        }
+    }
+    
+    console.log('Final attachments count:', attachments.length);
+    console.log('PDF attachments:', attachments.filter(a => a.isPdf).length);
+    
     const downloadDir = this.ensureDownloadDir(outputDir);
 
     const emailHeaders: EmailHeaders = {
@@ -125,7 +174,8 @@ export class EmailsService {
             attachments, 
             pdfRule, 
             downloadDir, 
-            emailHeaders
+            emailHeaders,
+            currentProvider
         );
 
         return {
@@ -133,10 +183,12 @@ export class EmailsService {
             attachments,
             ...result,
             pdfRule,
-            merged: pdfRule === PdfRule.MAIN_BODY_WITH_ATTACHMENT
+            merged: pdfRule === PdfRule.MAIN_BODY_WITH_ATTACHMENT,
+            provider: currentProvider
         };
     } catch (error) {
-        console.log('Error during processing:', error);
+        console.log('Error during processing:', error.message);
+        console.log('Error stack:', error.stack);
         await this.markRuleAsFailed(messageId, pdfRule, error.message);
         throw error;
     }
@@ -145,12 +197,19 @@ export class EmailsService {
   async processMultipleEmails(
       messageIds: string[],
       pdfRule: PdfRule = PdfRule.MAIN_BODY_WITH_ATTACHMENT,
-      outputDir?: string
+      outputDir?: string,
+      provider?: EmailProvider
   ): Promise<EmailProcessResult[]> {
+      const currentProvider = provider || this.currentProvider;
+      if (!currentProvider) {
+          throw new Error('Provider must be specified');
+      }
+
       const processEmail = async (id: string): Promise<EmailProcessResult | null> => {
           try {
-              return await this.processEmail(id, pdfRule, outputDir);
+              return await this.processEmail(id, pdfRule, outputDir, currentProvider);
           } catch (error) {
+              console.error(`Failed to process email ${id}:`, error.message);
               return null;
           }
       };
@@ -161,6 +220,7 @@ export class EmailsService {
 
   async autoProcessAllEmails(
       sessionId: string,
+      provider: EmailProvider,
       maxEmails: number = 10,
       pdfRule: PdfRule = PdfRule.MAIN_BODY_WITH_ATTACHMENT,
       outputDir?: string
@@ -170,9 +230,9 @@ export class EmailsService {
       let emailResults: EmailProcessResult[] = [];
 
       try {
-          await this.setSessionId(sessionId);
+          await this.setSessionId(sessionId, provider);
           
-          const emailListResponse = await this.gmailService.getEmailList(maxEmails, sessionId);
+          const emailListResponse = await this.getEmailList(maxEmails, provider);
           const messageIds = emailListResponse.emails.map(email => email.messageId);
           
           if (messageIds.length === 0) {
@@ -183,11 +243,12 @@ export class EmailsService {
                   failedEmails: 0,
                   emailResults: [],
                   errors: ['email list is empty'],
-                  processingTime: Date.now() - startTime
+                  processingTime: Date.now() - startTime,
+                  provider
               };
           }
 
-          emailResults = await this.processMultipleEmails(messageIds, pdfRule, outputDir);
+          emailResults = await this.processMultipleEmails(messageIds, pdfRule, outputDir, provider);
           
           const processedCount = emailResults.filter(result => !result.skipped).length;
           const failedCount = messageIds.length - emailResults.length;
@@ -199,7 +260,8 @@ export class EmailsService {
               failedEmails: failedCount,
               emailResults,
               errors,
-              processingTime: Date.now() - startTime
+              processingTime: Date.now() - startTime,
+              provider
           };
 
       } catch (error) {
@@ -213,14 +275,20 @@ export class EmailsService {
               failedEmails: 0,
               emailResults,
               errors,
-              processingTime: Date.now() - startTime
+              processingTime: Date.now() - startTime,
+              provider
           };
       }
   }
 
-  async getEmailPageCount(messageId: string): Promise<number> {
+  async getEmailPageCount(messageId: string, provider?: EmailProvider): Promise<number> {
       try {
-          const email = await this.gmailService.getEmailById(messageId, this.sessionId!);
+          const currentProvider = provider || this.currentProvider;
+          if (!currentProvider) {
+              throw new Error('Provider must be specified');
+          }
+
+          const email = await this.getEmailById(messageId, currentProvider);
           const htmlContent = this.htmlService.createEmailHTML(email, []);
           const emailPdfBuffer = await this.puppeteerService.convertHtmlToPdf(htmlContent, null!, true);
           const pdf = await PDFDocument.load(emailPdfBuffer);
@@ -236,6 +304,86 @@ export class EmailsService {
 
   async getRuleFiles(messageId: string, pdfRule: PdfRule): Promise<string[]> {
       return await this.supabaseService.getRuleFiles(messageId, pdfRule);
+  }
+
+  private async getEmailById(messageId: string, provider: EmailProvider) {
+      if (provider === EmailProvider.GMAIL) {
+          return await this.gmailService.getEmailById(messageId, this.sessionId!);
+      } else if (provider === EmailProvider.OUTLOOK) {
+          return await this.outlookService.getEmailById(messageId, this.sessionId!);
+      } else {
+          throw new Error(`Unsupported provider: ${provider}`);
+      }
+  }
+
+  private async getEmailList(maxEmails: number, provider: EmailProvider) {
+      if (provider === EmailProvider.GMAIL) {
+          return await this.gmailService.getEmailList(maxEmails, this.sessionId!);
+      } else if (provider === EmailProvider.OUTLOOK) {
+          return await this.outlookService.getEmailList(maxEmails, this.sessionId!);
+      } else {
+          throw new Error(`Unsupported provider: ${provider}`);
+      }
+  }
+
+  private async downloadAttachments(
+      attachments: any[], 
+      messageId: string, 
+      downloadDir: string, 
+      provider: EmailProvider
+  ): Promise<{ paths: string[], names: string[] }> {
+      const pdfAttachmentPaths: string[] = [];
+      const attachmentNames: string[] = [];
+      
+      console.log('=== Download Attachments Debug ===');
+      console.log('Total attachments:', attachments.length);
+      console.log('PDF attachments:', attachments.filter(a => a.isPdf).length);
+      
+      for (const attachment of attachments) {
+          if (attachment.isPdf) {
+              console.log(`Downloading PDF: ${attachment.filename}`);
+              console.log(`Attachment ID: ${attachment.attachmentId}`);
+              console.log(`MIME Type: ${attachment.mimeType}`);
+              
+              let attachmentPath: string;
+              
+              try {
+                  if (provider === EmailProvider.GMAIL) {
+                      attachmentPath = await this.gmailService.downloadAttachment(
+                          messageId,
+                          attachment.attachmentId,
+                          attachment.filename,
+                          downloadDir,
+                          this.sessionId!
+                      );
+                  } else if (provider === EmailProvider.OUTLOOK) {
+                      attachmentPath = await this.outlookService.downloadAttachment(
+                          messageId,
+                          attachment.attachmentId,
+                          attachment.filename,
+                          downloadDir,
+                          this.sessionId!
+                      );
+                  } else {
+                      throw new Error(`Unsupported provider: ${provider}`);
+                  }
+                  
+                  console.log(`Downloaded to: ${attachmentPath}`);
+                  console.log(`File exists: ${fs.existsSync(attachmentPath)}`);
+                  if (fs.existsSync(attachmentPath)) {
+                      console.log(`File size: ${fs.statSync(attachmentPath).size} bytes`);
+                  }
+                  
+                  pdfAttachmentPaths.push(attachmentPath);
+                  attachmentNames.push(attachment.filename);
+              } catch (downloadError) {
+                  console.error(`Failed to download ${attachment.filename}:`, downloadError.message);
+              }
+          }
+      }
+
+      console.log('Downloaded PDF paths:', pdfAttachmentPaths);
+      return { paths: pdfAttachmentPaths, names: attachmentNames };
   }
 
   private isRuleAlreadyProcessed(existingEmail: any, pdfRule: PdfRule): boolean {
@@ -327,27 +475,6 @@ export class EmailsService {
       return downloadDir;
   }
 
-  private async downloadAttachments(attachments: any[], messageId: string, downloadDir: string): Promise<{ paths: string[], names: string[] }> {
-      const pdfAttachmentPaths: string[] = [];
-      const attachmentNames: string[] = [];
-      
-      for (const attachment of attachments) {
-          if (attachment.isPdf) {
-              const attachmentPath = await this.gmailService.downloadAttachment(
-                  messageId,
-                  attachment.attachmentId,
-                  attachment.filename,
-                  downloadDir,
-                  this.sessionId!
-              );
-              pdfAttachmentPaths.push(attachmentPath);
-              attachmentNames.push(attachment.filename);
-          }
-      }
-
-      return { paths: pdfAttachmentPaths, names: attachmentNames };
-  }
-
   private async writeOutputFilesAndUpload(
    result: any, 
    pdfRule: PdfRule, 
@@ -357,15 +484,23 @@ export class EmailsService {
  ): Promise<{ localPaths: string[], uploadResults: any[] }> {
       const localPaths: string[] = [];
       
+      console.log('=== Writing Output Files ===');
+      console.log('Merged PDF exists:', !!result.mergedPdf);
+      console.log('Email PDF exists:', !!result.emailPdf);
+      console.log('Attachment PDFs count:', result.attachmentPdfs?.length || 0);
+      console.log('Filenames:', result.filenames);
+      
       if (result.mergedPdf) {
           const mergedPath = path.join(downloadDir, result.filenames[0]);
           fs.writeFileSync(mergedPath, result.mergedPdf);
+          console.log(`Merged PDF written to: ${mergedPath}`);
           localPaths.push(mergedPath);
       }
 
       if (result.emailPdf) {
           const emailPath = path.join(downloadDir, result.filenames[0]);
           fs.writeFileSync(emailPath, result.emailPdf);
+          console.log(`Email PDF written to: ${emailPath}`);
           localPaths.push(emailPath);
       }
 
@@ -374,17 +509,22 @@ export class EmailsService {
               const attachmentIndex = pdfRule === PdfRule.MAIN_BODY_SEPARATE_ATTACHMENT ? index + 1 : index;
               const attachmentPath = path.join(downloadDir, result.filenames[attachmentIndex]);
               fs.writeFileSync(attachmentPath, attachmentBuffer);
+              console.log(`Attachment PDF ${index + 1} written to: ${attachmentPath}`);
               localPaths.push(attachmentPath);
           });
       }
 
       const safeUserEmail = authenticatedUserEmail.replace(/[@.]/g, '_');
       const folder = `${safeUserEmail}/${gmailId}/${pdfRule}`;
+      console.log(`Uploading to folder: ${folder}`);
+      
       const uploadResults = await this.supabaseService.uploadMultiplePdfs(localPaths, folder, result.filenames);
+      console.log('Upload results:', uploadResults.map(r => ({ fileName: r.fileName, url: r.url })));
       
       localPaths.forEach(filePath => {
           if (fs.existsSync(filePath)) {
               fs.unlinkSync(filePath);
+              console.log(`Cleaned up: ${filePath}`);
           }
       });
 
@@ -396,17 +536,35 @@ export class EmailsService {
       attachments: any[], 
       pdfRule: PdfRule,
       downloadDir: string, 
-      emailHeaders: EmailHeaders
+      emailHeaders: EmailHeaders,
+      provider: EmailProvider
   ) {
+      console.log('=== Generate PDF With Options ===');
+      console.log('Email subject:', emailHeaders.subject);
+      console.log('PDF Rule:', pdfRule);
+      console.log('Provider:', provider);
+      
+      console.log('Creating HTML content...');
       const htmlContent = this.htmlService.createEmailHTML(email, attachments);
+      console.log('HTML content length:', htmlContent.length);
+      console.log('HTML preview:', htmlContent.substring(0, 200));
+      
+      console.log('Converting HTML to PDF...');
       const emailPdfBuffer = await this.puppeteerService.convertHtmlToPdf(htmlContent, null!, true);
+      console.log('Email PDF buffer size:', emailPdfBuffer.length);
       
       const { paths: pdfAttachmentPaths, names: attachmentNames } = await this.downloadAttachments(
           attachments, 
           email.messageId, 
-          downloadDir
+          downloadDir,
+          provider
       );
 
+      console.log('Processing PDF with rule...');
+      console.log('Email PDF buffer size:', emailPdfBuffer.length);
+      console.log('Attachment paths:', pdfAttachmentPaths);
+      console.log('Attachment names:', attachmentNames);
+      
       const result = await this.pdfService.processPdfWithRule(
           emailPdfBuffer,
           pdfAttachmentPaths,
@@ -415,6 +573,13 @@ export class EmailsService {
           pdfRule,
           email.messageId
       );
+      
+      console.log('PDF processing result:', {
+          mergedPdf: !!result.mergedPdf,
+          emailPdf: !!result.emailPdf,
+          attachmentPdfs: result.attachmentPdfs?.length || 0,
+          filenames: result.filenames
+      });
 
       const userEmail = this.authenticatedUserEmail || 'unknown_user';
       
@@ -458,6 +623,7 @@ export class EmailsService {
                       size: attachment.size
                   });
               } catch (error) {
+                  console.error(`Failed to analyze attachment ${attachment.filename}:`, error);
                   attachmentPageInfo.push({
                       originalName: attachment.filename,
                       pageCount: 1,

@@ -23,11 +23,14 @@ import { EmailsModule } from './emails/emails.module';
 import { SupabaseService } from './supabase/supabase.service';
 import { AutoProcessService } from './auto/auto.service';
 import { AutoProcessController } from './auto/auto.controller';
+import { OutlookService } from './outlook/outlook.service';
+import { WebhookModule } from './webhook/webhook.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-    EmailsModule, // ⬅️ 让 EmailsModule 负责 EmailsController 和 EmailsService
+    EmailsModule,
+    WebhookModule,
   ],
   controllers: [
     AuthController,
@@ -48,6 +51,7 @@ import { AutoProcessController } from './auto/auto.controller';
     DemergeService,
     SupabaseService,
     AutoProcessService,
+    OutlookService,
   ],
 })
 export class AppModule {}
