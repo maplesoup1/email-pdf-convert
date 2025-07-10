@@ -1,220 +1,295 @@
 import { Injectable } from '@nestjs/common';
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import * as fs from 'fs';
-import * as path from 'path';
+import { PdfRule } from '../emails/emails.entity';
 
-interface AttachmentInfo {
-   originalName: string;
-   pageCount: number;
-}
-
-interface DemergePdfResult {
-   type: 'email' | 'attachment';
-   filename: string;
-   path: string;
-   pageCount: number;
-   originalName?: string;
+interface PdfProcessResult {
+  mergedPdf?: Buffer;
+  emailPdf?: Buffer;
+  attachmentPdfs?: Buffer[];
+  filenames: string[];
 }
 
 interface EmailHeaders {
-   subject: string;
-   from: string;
-   date: string;
+  subject: string;
+  from: string;
+  date: string;
 }
 
 @Injectable()
 export class PdfService {
-   async addBasicFooter(pdfDoc: PDFDocument): Promise<void> {
-       const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-       const pages = pdfDoc.getPages();
-       const now = new Date();
-       const pad = (n: number): string => String(n).padStart(2, '0');
-       const currentDateTime = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-       
-       for (let i = 0; i < pages.length; i++) {
-           const page = pages[i];
-           const { width } = page.getSize();
-           const pageText = `Page ${i + 1} of ${pages.length} | Generated: ${currentDateTime}`;
-           const textWidth = font.widthOfTextAtSize(pageText, 9);
-           const x = (width - textWidth) / 2;
-           
-           page.drawText(pageText, {
-               x: x,
-               y: 20,
-               size: 9,
-               font: font,
-               color: rgb(0.5, 0.5, 0.5),
-           });
-       }
-   }
 
-   async addEmailMainBodyHeader(pdfDoc: PDFDocument, subject: string, from: string, date: string): Promise<void> {
+  private async addHeaderToPdf(
+    pdfDoc: PDFDocument, 
+    headerText: string, 
+    position: 'top' | 'bottom' = 'top'
+  ): Promise<void> {
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
     const pages = pdfDoc.getPages();
     
     for (let i = 0; i < pages.length; i++) {
-        const page = pages[i];
-        const { width } = page.getSize();
-        const pageText = `This is email main body page ${i + 1} of ${pages.length}`;
-        const textWidth = font.widthOfTextAtSize(pageText, 10);
-        const x = (width - textWidth) / 2;
-        
-        page.drawText(pageText, {
-            x: x,
-            y: page.getHeight() - 30,
-            size: 10,
-            font: font,
-            color: rgb(0.5, 0.5, 0.5),
-        });
+      const page = pages[i];
+      const { width, height } = page.getSize();
+      const pageText = headerText.replace('{pageNumber}', (i + 1).toString())
+                                .replace('{totalPages}', pages.length.toString());
+      const textWidth = font.widthOfTextAtSize(pageText, position === 'bottom' ? 9 : 10);
+      const x = position === 'top' ? 40 : (width - textWidth) / 2;
+      const y = position === 'bottom' ? 20 : height - 30;
+      
+      page.drawText(pageText, {
+        x: x,
+        y: y,
+        size: position === 'bottom' ? 9 : 10,
+        font: font,
+        color: rgb(0.5, 0.5, 0.5),
+      });
     }
- }
+  }
 
- async addAttachmentHeader(pdfDoc: PDFDocument, attachmentName: string): Promise<void> {
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const pages = pdfDoc.getPages();
+  async addBasicFooter(pdfDoc: PDFDocument): Promise<void> {
+    const now = new Date();
+    const pad = (n: number): string => String(n).padStart(2, '0');
+    const currentDateTime = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+    const footerText = `Page {pageNumber} of {totalPages} | Generated: ${currentDateTime}`;
     
-    for (let i = 0; i < pages.length; i++) {
-        const page = pages[i];
-        const { width } = page.getSize();
-        const pageText = `This is attachment page ${i + 1} of ${pages.length}`;
-        const textWidth = font.widthOfTextAtSize(pageText, 10);
-        const x = (width - textWidth) / 2;
-        
-        page.drawText(pageText, {
-            x: x,
-            y: page.getHeight() - 30,
-            size: 10,
-            font: font,
-            color: rgb(0.5, 0.5, 0.5),
-        });
+    await this.addHeaderToPdf(pdfDoc, footerText, 'bottom');
+  }
+
+  async addEmailMainBodyHeader(pdfDoc: PDFDocument, subject: string, from: string, date: string): Promise<void> {
+    const headerText = `[Email Main Body] page {pageNumber} of {totalPages}`;
+    await this.addHeaderToPdf(pdfDoc, headerText, 'top');
+  }
+
+  async addAttachmentHeader(pdfDoc: PDFDocument, attachmentName: string): Promise<void> {
+    const headerText = `[Attachment] page {pageNumber} of {totalPages}`;
+    await this.addHeaderToPdf(pdfDoc, headerText, 'top');
+  }
+
+  private async processEmailPdf(emailPdfBuffer: Buffer, emailHeaders: EmailHeaders): Promise<Buffer> {
+    const emailPdf = await PDFDocument.load(emailPdfBuffer);
+    await this.addEmailMainBodyHeader(emailPdf, emailHeaders.subject, emailHeaders.from, emailHeaders.date);
+    await this.addBasicFooter(emailPdf);
+    const processedPdfBuffer = await emailPdf.save();
+    return Buffer.from(processedPdfBuffer);
+  }
+
+  private async processAttachmentPdf(pdfPath: string, attachmentName: string): Promise<Buffer> {
+    const pdfBuffer = fs.readFileSync(pdfPath);
+    const pdf = await PDFDocument.load(pdfBuffer);
+    await this.addAttachmentHeader(pdf, attachmentName);
+    await this.addBasicFooter(pdf);
+    const processedPdfBuffer = await pdf.save();
+    return Buffer.from(processedPdfBuffer);
+  }
+
+  async processPdfWithRule(
+    emailPdfBuffer: Buffer,
+    attachmentPaths: string[],
+    emailHeaders: EmailHeaders,
+    attachmentNames: string[],
+    pdfRule: PdfRule,
+    messageId: string
+  ): Promise<PdfProcessResult> {
+    
+    switch (pdfRule) {
+      case PdfRule.MAIN_BODY_WITH_ATTACHMENT:
+        return this.mergeEmailWithAttachments(
+          emailPdfBuffer, 
+          attachmentPaths, 
+          emailHeaders,
+          attachmentNames,
+          messageId
+        );
+
+      case PdfRule.MAIN_BODY_SEPARATE_ATTACHMENT:
+        return this.separateEmailAndAttachments(
+          emailPdfBuffer, 
+          attachmentPaths, 
+          emailHeaders, 
+          attachmentNames, 
+          messageId
+        );
+
+      case PdfRule.ATTACHMENT_ONLY:
+        return this.attachmentOnly(
+          attachmentPaths, 
+          attachmentNames, 
+          emailHeaders, 
+          messageId
+        );
+
+      default:
+        throw new Error(`Unsupported PDF rule: ${pdfRule}`);
     }
- }
+  }
 
-   async mergePDFs(emailPdfBuffer: Buffer, attachmentPdfPaths: string[], emailHeaders: EmailHeaders, attachmentNames: string[]): Promise<Buffer> {
-       const mergedPdf = await PDFDocument.create();
-       
-       const emailPdf = await PDFDocument.load(emailPdfBuffer);
-       await this.addEmailMainBodyHeader(emailPdf, emailHeaders.subject, emailHeaders.from, emailHeaders.date);
-       const emailPages = await mergedPdf.copyPages(emailPdf, emailPdf.getPageIndices());
-       emailPages.forEach((page) => mergedPdf.addPage(page));
-       
-       for (let i = 0; i < attachmentPdfPaths.length; i++) {
-           const pdfPath = attachmentPdfPaths[i];
-           if (fs.existsSync(pdfPath)) {
-               console.log(`Merging: ${path.basename(pdfPath)}`);
-               const pdfBuffer = fs.readFileSync(pdfPath);
-               const pdf = await PDFDocument.load(pdfBuffer);
-               
-               const attachmentName = attachmentNames[i] || path.basename(pdfPath);
-               await this.addAttachmentHeader(pdf, attachmentName);
-               
-               const pages = await mergedPdf.copyPages(pdf, pdf.getPageIndices());
-               pages.forEach((page) => mergedPdf.addPage(page));
-           }
-       }
-       
-       await this.addBasicFooter(mergedPdf);
-       const mergedPdfBuffer = await mergedPdf.save();
-       return Buffer.from(mergedPdfBuffer);
-   }
+  private async mergeEmailWithAttachments(
+    emailPdfBuffer: Buffer,
+    attachmentPaths: string[],
+    emailHeaders: EmailHeaders,
+    attachmentNames: string[],
+    messageId: string
+  ): Promise<PdfProcessResult> {
+    const mergedPdf = await PDFDocument.create();
+    
+    const emailPdf = await PDFDocument.load(emailPdfBuffer);
+    await this.addEmailMainBodyHeader(emailPdf, emailHeaders.subject, emailHeaders.from, emailHeaders.date);
+    const emailPages = await mergedPdf.copyPages(emailPdf, emailPdf.getPageIndices());
+    emailPages.forEach((page) => mergedPdf.addPage(page));
 
-   async createEmailOnlyPDF(emailPdfBuffer: Buffer, emailHeaders: EmailHeaders): Promise<Buffer> {
-       const emailPdf = await PDFDocument.load(emailPdfBuffer);
-       await this.addEmailMainBodyHeader(emailPdf, emailHeaders.subject, emailHeaders.from, emailHeaders.date);
-       await this.addBasicFooter(emailPdf);
-       const processedPdfBuffer = await emailPdf.save();
-       return Buffer.from(processedPdfBuffer);
-   }
+    for (let i = 0; i < attachmentPaths.length; i++) {
+      const attachmentPath = attachmentPaths[i];
+      try {
+        const attachmentBuffer = fs.readFileSync(attachmentPath);
+        const attachmentPdf = await PDFDocument.load(attachmentBuffer);
+        const attachmentName = attachmentNames[i] || attachmentPath;
+        await this.addAttachmentHeader(attachmentPdf, attachmentName);
+        const attachmentPages = await mergedPdf.copyPages(
+          attachmentPdf, 
+          attachmentPdf.getPageIndices()
+        );
+        attachmentPages.forEach((page) => mergedPdf.addPage(page));
+      } catch (error) {
+        console.error(`Failed to merge attachment ${attachmentPath}:`, error);
+      }
+    }
 
-   async demergePDF(mergedPdfPath: string, emailPageCount: number, attachmentInfo: AttachmentInfo[], outputDir: string, emailHeaders?: EmailHeaders): Promise<DemergePdfResult[]> {
-       const mergedPdfBuffer = fs.readFileSync(mergedPdfPath);
-       const mergedPdf = await PDFDocument.load(mergedPdfBuffer);
-       const totalPages = mergedPdf.getPageCount();
-       const results: DemergePdfResult[] = [];
-       
-       if (!fs.existsSync(outputDir)) {
-           fs.mkdirSync(outputDir, { recursive: true });
-       }
-       
-       if (emailPageCount > 0) {
-           const emailPdf = await PDFDocument.create();
-           const emailPages = await emailPdf.copyPages(mergedPdf, Array.from({ length: emailPageCount }, (_, i) => i));
-           emailPages.forEach(page => emailPdf.addPage(page));
-           
-           if (emailHeaders) {
-               await this.addEmailMainBodyHeader(emailPdf, emailHeaders.subject, emailHeaders.from, emailHeaders.date);
-           }
-           
-           await this.addBasicFooter(emailPdf);
-           const emailPdfBuffer = await emailPdf.save();
-           const emailFilename = path.basename(mergedPdfPath).replace('_merged', '_email_only');
-           const emailPath = path.join(outputDir, emailFilename);
-           
-           fs.writeFileSync(emailPath, emailPdfBuffer);
-           
-           results.push({
-               type: 'email',
-               filename: emailFilename,
-               path: emailPath,
-               pageCount: emailPageCount
-           });
-       }
-       
-       let currentPageIndex = emailPageCount;
-       
-       for (const attachment of attachmentInfo) {
-           if (currentPageIndex >= totalPages) break;
-           
-           const attachmentPdf = await PDFDocument.create();
-           const endPageIndex = Math.min(currentPageIndex + attachment.pageCount, totalPages);
-           const pageIndices = Array.from({ length: endPageIndex - currentPageIndex }, (_, i) => currentPageIndex + i);
+    await this.addBasicFooter(mergedPdf);
+    const mergedPdfBytes = await mergedPdf.save();
+    const filename = this.generateFilename(emailHeaders, messageId, 'merged');
 
-           if (pageIndices.length > 0) {
-               const attachmentPages = await attachmentPdf.copyPages(mergedPdf, pageIndices);
-               attachmentPages.forEach(page => attachmentPdf.addPage(page));
+    return {
+      mergedPdf: Buffer.from(mergedPdfBytes),
+      filenames: [filename]
+    };
+  }
 
-               await this.addAttachmentHeader(attachmentPdf, attachment.originalName);
-               await this.addBasicFooter(attachmentPdf);
-               const attachmentPdfBuffer = await attachmentPdf.save();
-               const attachmentFilename = `demerged_${attachment.originalName}`;
-               const attachmentPath = path.join(outputDir, attachmentFilename);
+  private async separateEmailAndAttachments(
+    emailPdfBuffer: Buffer,
+    attachmentPaths: string[],
+    emailHeaders: EmailHeaders,
+    attachmentNames: string[],
+    messageId: string
+  ): Promise<PdfProcessResult> {
+    const attachmentPdfs: Buffer[] = [];
+    const filenames: string[] = [];
 
-               fs.writeFileSync(attachmentPath, attachmentPdfBuffer);
+    const processedEmailPdf = await this.processEmailPdf(emailPdfBuffer, emailHeaders);
+    const emailFilename = this.generateFilename(emailHeaders, messageId, 'email');
+    filenames.push(emailFilename);
 
-               results.push({
-                   type: 'attachment',
-                   filename: attachmentFilename,
-                   path: attachmentPath,
-                   originalName: attachment.originalName,
-                   pageCount: pageIndices.length
-               });
+    for (let i = 0; i < attachmentPaths.length; i++) {
+      const attachmentPath = attachmentPaths[i];
+      const attachmentName = attachmentNames[i];
+      
+      try {
+        const processedAttachmentBuffer = await this.processAttachmentPdf(attachmentPath, attachmentName);
+        attachmentPdfs.push(processedAttachmentBuffer);
+        
+        const attachmentFilename = this.generateAttachmentFilename(
+          emailHeaders, 
+          messageId, 
+          attachmentName, 
+          i
+        );
+        filenames.push(attachmentFilename);
+      } catch (error) {
+        console.error(`Failed to process attachment ${attachmentPath}:`, error);
+      }
+    }
 
-               currentPageIndex = endPageIndex;
-           }
-       }
+    return {
+      emailPdf: processedEmailPdf,
+      attachmentPdfs,
+      filenames
+    };
+  }
 
-       return results;
-   }
+  private async attachmentOnly(
+    attachmentPaths: string[],
+    attachmentNames: string[],
+    emailHeaders: EmailHeaders,
+    messageId: string
+  ): Promise<PdfProcessResult> {
+    const attachmentPdfs: Buffer[] = [];
+    const filenames: string[] = [];
 
-   generateSafeFileName(subject: string, messageId: string, isMerged: boolean = false): string {
-       const safeSubject = subject
-           .replace(/[<>:"/\\|?*]/g, '_')
-           .replace(/\s+/g, '_')
-           .substring(0, 50);
-       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substring(0, 19);
-       const suffix = isMerged ? '_merged' : '';
-       
-       return `${safeSubject}_${timestamp}_${messageId.substring(0, 8)}${suffix}.pdf`;
-   }
+    for (let i = 0; i < attachmentPaths.length; i++) {
+      const attachmentPath = attachmentPaths[i];
+      const attachmentName = attachmentNames[i];
+      
+      try {
+        const processedAttachmentBuffer = await this.processAttachmentPdf(attachmentPath, attachmentName);
+        attachmentPdfs.push(processedAttachmentBuffer);
+        
+        const attachmentFilename = this.generateAttachmentFilename(
+          emailHeaders, 
+          messageId, 
+          attachmentName, 
+          i
+        );
+        filenames.push(attachmentFilename);
+      } catch (error) {
+        console.error(`Failed to process attachment ${attachmentPath}:`, error);
+      }
+    }
 
-   cleanupTempFiles(filePaths: string[]): void {
-       filePaths.forEach(filePath => {
-           if (fs.existsSync(filePath)) {
-               const stats = fs.statSync(filePath);
-               if (stats.isFile()) {
-                   fs.unlinkSync(filePath);
-               }
-           }
-       });
-   }
+    return {
+      attachmentPdfs,
+      filenames
+    };
+  }
+
+  generateFilename(
+    emailHeaders: EmailHeaders, 
+    messageId: string, 
+    type: string
+  ): string {
+    const sanitizedSubject = this.sanitizeFilename(emailHeaders.subject);
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+    return `${timestamp}_${sanitizedSubject}_${type}_${messageId.slice(-8)}.pdf`;
+  }
+
+  private generateAttachmentFilename(
+    emailHeaders: EmailHeaders,
+    messageId: string,
+    originalName: string,
+    index: number
+  ): string {
+    const sanitizedSubject = this.sanitizeFilename(emailHeaders.subject);
+    const sanitizedOriginalName = this.sanitizeFilename(
+      originalName.replace(/\.pdf$/i, '')
+    );
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
+    return `${timestamp}_${sanitizedSubject}_attachment_${index + 1}_${sanitizedOriginalName}_${messageId.slice(-8)}.pdf`;
+  }
+
+  sanitizeFilename(filename: string): string {
+    return filename
+      .replace(/[<>:"/\\|?*]/g, '_')
+      .replace(/\s+/g, '_')
+      .substring(0, 50);
+  }
+
+  async getPdfPageCount(pdfBuffer: Buffer): Promise<number> {
+    try {
+      const pdf = await PDFDocument.load(pdfBuffer);
+      return pdf.getPageCount();
+    } catch (error) {
+      console.error('Failed to get PDF page count:', error);
+      return 1;
+    }
+  }
+
+  cleanupTempFiles(filePaths: string[]): void {
+    filePaths.forEach(filePath => {
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      } catch (error) {
+        console.error(`Failed to cleanup temp file ${filePath}:`, error);
+      }
+    });
+  }
 }

@@ -1,15 +1,14 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 
-// Controllers
-import { EmailsController } from './emails/emails.controller';
+// Other controllers
 import { AuthController } from './auth/auth.controller';
 import { AttachmentsController } from './attachments/attachments.controller';
 import { DemergeController } from './demerge/demerge.controller';
 import { DownloadController } from './download/download.controller';
+import { PdfController } from './pdf/pdf.controller';
 
-// Services
-import { EmailsService } from './emails/emails.service';
+// Other services
 import { AuthService } from './auth/auth.service';
 import { GmailService } from './gmail/gmail.service';
 import { PdfService } from './pdf/pdf.service';
@@ -19,21 +18,29 @@ import { AttachmentsService } from './attachments/attachments.service';
 import { DownloadService } from './download/download.service';
 import { DemergeService } from './demerge/demerge.service';
 
+// Custom modules
+import { EmailsModule } from './emails/emails.module';
+import { SupabaseService } from './supabase/supabase.service';
+import { AutoProcessService } from './auto/auto.service';
+import { AutoProcessController } from './auto/auto.controller';
+import { OutlookService } from './outlook/outlook.service';
+import { WebhookModule } from './webhook/webhook.module';
+
 @Module({
   imports: [
-    ConfigModule.forRoot({
-      isGlobal: true,
-    }),
+    ConfigModule.forRoot({ isGlobal: true }),
+    EmailsModule,
+    WebhookModule,
   ],
   controllers: [
-    EmailsController,
     AuthController,
     AttachmentsController,
     DemergeController,
     DownloadController,
+    PdfController,
+    AutoProcessController,
   ],
   providers: [
-    EmailsService,
     AuthService,
     GmailService,
     PdfService,
@@ -42,6 +49,9 @@ import { DemergeService } from './demerge/demerge.service';
     AttachmentsService,
     DownloadService,
     DemergeService,
+    SupabaseService,
+    AutoProcessService,
+    OutlookService,
   ],
 })
 export class AppModule {}

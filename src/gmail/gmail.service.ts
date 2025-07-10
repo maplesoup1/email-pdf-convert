@@ -19,6 +19,7 @@ interface Email {
 
 interface EmailMessage {
    messageId: string;
+   threadId: string;
    subject: string;
    from: string;
    to: string;
@@ -50,6 +51,19 @@ export class GmailService {
                throw new Error('SessionId is required for authentication');
            }
            this.gmail = await this.authService.getGmailClient(this.sessionId);
+       }
+   }
+
+   async getAuthenticatedUserEmail(sessionId: string): Promise<string> {
+       try {
+           await this.ensureAuthenticated(sessionId);
+           const profile = await this.gmail.users.getProfile({
+               userId: 'me'
+           });
+           return profile.data.emailAddress!;
+       } catch (error) {
+           console.error('Failed to get authenticated user email:', error);
+           throw error;
        }
    }
 
@@ -137,6 +151,7 @@ export class GmailService {
 
        return {
            messageId: message.id,
+           threadId: message.threadId || message.id,
            subject,
            from,
            to,
@@ -162,4 +177,50 @@ export class GmailService {
        
        return filePath;
    }
+
+   async getRecentEmails(sessionId: string, maxResults: number = 50): Promise<EmailListResponse> {
+    await this.ensureAuthenticated(sessionId);
+    
+    const twentyFourHoursAgo = new Date();
+    twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+    
+    const afterDate = twentyFourHoursAgo.toISOString().split('T')[0].replace(/-/g, '/');
+    
+    const listResponse = await this.gmail.users.messages.list({
+        userId: 'me',
+        maxResults: parseInt(maxResults.toString()),
+        q: `after:${afterDate}`
+    });
+
+    const emails: Email[] = [];
+    for (const message of listResponse.data.messages || []) {
+        const messageResponse = await this.gmail.users.messages.get({
+            userId: 'me',
+            id: message.id,
+            format: 'metadata',
+            metadataHeaders: ['Subject', 'From', 'Date']
+        });
+        
+        const headers = messageResponse.data.payload.headers;
+        const receivedDate = new Date(parseInt(messageResponse.data.internalDate));
+        
+        if (receivedDate >= twentyFourHoursAgo) {
+            emails.push({
+                messageId: message.id,
+                subject: headers.find(h => h.name === 'Subject')?.value || '',
+                from: headers.find(h => h.name === 'From')?.value || '',
+                date: headers.find(h => h.name === 'Date')?.value || '',
+                receiveDate: receivedDate.toISOString(),
+                snippet: messageResponse.data.snippet
+            });
+        }
+    }
+
+    emails.sort((a, b) => new Date(b.receiveDate).getTime() - new Date(a.receiveDate).getTime());
+
+    return {
+        emails,
+        nextPageToken: listResponse.data.nextPageToken
+    };
+}
 }

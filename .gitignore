@@ -58,3 +58,4 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 /user_tokens/
 credentials.json
 token.json
+/outlook_tokens/
