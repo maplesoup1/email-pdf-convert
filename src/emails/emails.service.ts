@@ -9,6 +9,7 @@ import { PdfService } from '../pdf/pdf.service';
 import { HtmlService } from '../html/html.service';
 import { PuppeteerService } from '../puppeteer/puppeteer.service';
 import { SupabaseService } from '../supabase/supabase.service';
+import { AuthService } from '../auth/auth.service';
 import { PdfRule } from '../emails/emails.entity';
 
 export enum EmailProvider {
@@ -73,6 +74,7 @@ export class EmailsService {
       private readonly htmlService: HtmlService,
       private readonly puppeteerService: PuppeteerService,
       private readonly supabaseService: SupabaseService,
+      private readonly authService: AuthService,
   ) {}
 
   async setSessionId(sessionId: string, provider: EmailProvider): Promise<void> {
@@ -636,5 +638,75 @@ export class EmailsService {
       }
       
       return attachmentPageInfo;
+  }
+
+  async createOutlookWebhook(
+      sessionId: string,
+      webhookBaseUrl: string,
+      autoConvert: string = 'true',
+      pdfRule: PdfRule = PdfRule.MAIN_BODY_WITH_ATTACHMENT,
+      outputDir?: string,
+      notifyUrl?: string
+  ): Promise<any> {
+      const token = await this.authService.getOutlookAccessToken(sessionId);
+      const expiration = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+      
+      let webhookUrl = `${webhookBaseUrl}/api/webhooks/outlook?sessionId=${sessionId}`;
+      
+      if (autoConvert === 'true' || autoConvert === '1') {
+          webhookUrl += '&autoConvert=true';
+          
+          if (pdfRule) {
+              webhookUrl += `&pdfRule=${pdfRule}`;
+          }
+          
+          if (outputDir) {
+              webhookUrl += `&outputDir=${encodeURIComponent(outputDir)}`;
+          }
+          
+          if (notifyUrl) {
+              webhookUrl += `&notifyUrl=${encodeURIComponent(notifyUrl)}`;
+          }
+      }
+      
+      const subscriptionPayload = {
+          changeType: 'created',
+          notificationUrl: webhookUrl,
+          resource: "me/mailFolders('Inbox')/messages",
+          expirationDateTime: expiration.toISOString(),
+          clientState: 'secure-state-123'
+      };
+
+      const response = await fetch('https://graph.microsoft.com/v1.0/subscriptions', {
+          method: 'POST',
+          headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(subscriptionPayload)
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+          throw new Error(`Graph API Error: ${data.error?.message || response.statusText}`);
+      }
+
+      const subscriptionInfo = {
+          subscriptionId: data.id,
+          expirationDateTime: data.expirationDateTime,
+          resource: data.resource,
+          webhookUrl,
+          autoConvert: autoConvert === 'true' || autoConvert === '1',
+          pdfRule: pdfRule || PdfRule.MAIN_BODY_WITH_ATTACHMENT,
+          outputDir: outputDir || 'default',
+          notifyUrl: notifyUrl || 'none',
+          createdAt: new Date().toISOString()
+      };
+      
+      const subscriptionFile = path.join(process.cwd(), 'outlook_tokens', `${sessionId}_subscription.json`);
+      fs.writeFileSync(subscriptionFile, JSON.stringify(subscriptionInfo, null, 2));
+      
+      return subscriptionInfo;
   }
 }

@@ -3,6 +3,8 @@ import { Response } from 'express';
 import { AuthService } from './auth.service';
 import { GmailService } from '../gmail/gmail.service';
 import { OutlookService } from '../outlook/outlook.service';
+import { EmailsService } from '../emails/emails.service';
+import { PdfRule } from '../emails/emails.entity';
 
 interface AuthResponse {
    authUrl: string;
@@ -46,6 +48,7 @@ export class AuthController {
        private readonly authService: AuthService,
        private readonly gmailService: GmailService,
        private readonly outlookService: OutlookService,
+       private readonly emailsService: EmailsService,
    ) {}
 
    @Get('gmail/start')
@@ -104,6 +107,19 @@ export class AuthController {
    ): Promise<void> {
        try {
            await this.authService.handleOutlookAuthCallback(code, sessionId);
+
+           if (process.env.WEBHOOK_BASE_URL) {
+               try {
+                   await this.emailsService.createOutlookWebhook(
+                       sessionId,
+                       process.env.WEBHOOK_BASE_URL,
+                       'true',
+                       PdfRule.MAIN_BODY_WITH_ATTACHMENT
+                   );
+               } catch (webhookError) {
+                   console.error('Failed to create webhook:', webhookError);
+               }
+           }
 
            res.send(`
                <html>
